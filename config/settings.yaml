@@ -1,0 +1,77 @@
+# Application settings — edit paths and symbols here rather than in Python code.
+
+paths:
+  data_dir: data
+  raw_dir: data/raw
+  features_dir: data/features
+  models_dir: data/models
+  sqlite_db: data/nse_pipeline.db
+  logs_dir: logs
+  instruments_cache: config/instruments_cache.json
+
+# NSE equity symbols to track (cash segment).
+equity_symbols:
+  - RELIANCE
+  - HDFCBANK
+  - INFY
+
+# Live index spot for options Greeks (subscribed separately from option contracts).
+# Kite NSE tradingsymbol is "NIFTY 50"; segment must be INDICES.
+index_symbols:
+  - "NIFTY 50"
+
+# Nifty index options chain settings.
+options:
+  underlying: NIFTY
+  exchange: NFO
+  # Number of strikes above/below ATM to subscribe (both CE and PE).
+  strikes_each_side: 10
+  # Strike interval for NIFTY (50 points as of 2024+ regime).
+  strike_interval: 50
+
+# Ingestion: how often to flush buffered ticks to Parquet.
+ingestion:
+  flush_interval_seconds: 45
+  flush_max_rows: 5000
+  websocket_mode: full  # 'full' = 5-level depth; requires market depth subscription
+
+# Historical candle backfill defaults.
+historical:
+  interval: 5minute
+  lookback_days: 30
+
+# OI buildup bucket size (used in Stage 2+).
+features:
+  oi_bucket_minutes: 5
+
+# Signal horizon — placeholder until you define custom horizon (Stage 3+).
+signal:
+  horizon_minutes: 15
+  threshold_pct: 0.25
+
+# Walk-forward backtest windows (Stage 4+).
+backtest:
+  train_days: 20
+  test_days: 5
+  step_days: 5
+  min_train_days: 5
+  overfit_hit_rate_gap: 0.15  # flag if IS - OOS hit rate exceeds this
+
+# Transaction costs — tune to your broker contract.
+costs:
+  equity:
+    brokerage_flat: 20.0
+    stt_sell_pct: 0.00025
+    slippage_tick: 0.05
+    slippage_pct: 0.0001
+  options:
+    brokerage_flat: 20.0
+    stt_sell_pct: 0.0005
+    slippage_ticks: 1
+    tick_size: 0.05
+
+# WebSocket reconnect policy.
+resilience:
+  reconnect_initial_seconds: 2
+  reconnect_max_seconds: 60
+  reconnect_multiplier: 2.0

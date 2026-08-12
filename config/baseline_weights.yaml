@@ -1,0 +1,20 @@
+# Phase 1 hand-specified linear scoring weights (placeholder).
+# Replace these with your designed formulas before running baseline scorer.
+
+equity:
+  depth_ratio: 0.25
+  spread_bps: -0.15
+  ofi: 0.35
+  vwap_deviation: 0.25
+  intercept: 0.0
+
+options:
+  pcr: 0.20
+  oi_buildup_long: 0.30
+  oi_buildup_short: -0.30
+  delta: 0.15
+  gamma: 0.10
+  intercept: 0.0
+
+# Score above this threshold => bullish probability mapped via sigmoid in baseline.py
+score_threshold: 0.0
