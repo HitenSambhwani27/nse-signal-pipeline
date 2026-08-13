@@ -3,51 +3,97 @@
 paths:
   data_dir: data
   raw_dir: data/raw
+  compacted_dir: data/compacted
   features_dir: data/features
   models_dir: data/models
   sqlite_db: data/nse_pipeline.db
   logs_dir: logs
   instruments_cache: config/instruments_cache.json
+  membership_dir: config/membership
 
-# NSE equity symbols to track (cash segment).
-equity_symbols:
-  - RELIANCE
-  - HDFCBANK
-  - INFY
+# Universe membership — official NSE published constituent CSVs (refreshed periodically).
+# Quote-mode equities = Nifty 500 symbols minus Nifty 100 (no overlap).
+universe:
+  nifty100_csv_url: https://archives.nseindia.com/content/indices/ind_nifty100list.csv
+  nifty500_csv_url: https://archives.nseindia.com/content/indices/ind_nifty500list.csv
+  # Fallback mirrors if archives host is down.
+  nifty100_csv_fallback_url: https://www.niftyindices.com/IndexConstituent/ind_nifty100list.csv
+  nifty500_csv_fallback_url: https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv
+  membership_max_age_days: 7
 
-# Live index spot for options Greeks (subscribed separately from option contracts).
-# Kite NSE tradingsymbol is "NIFTY 50"; segment must be INDICES.
+# Live index spot for Greeks / basis (INDICES segment on NSE).
 index_symbols:
   - "NIFTY 50"
+  - "NIFTY BANK"
 
-# Nifty index options chain settings.
+# Index options only (Nifty + Bank Nifty). No equity options.
 options:
-  underlying: NIFTY
   exchange: NFO
-  # Number of strikes above/below ATM to subscribe (both CE and PE).
-  strikes_each_side: 10
-  # Strike interval for NIFTY (50 points as of 2024+ regime).
-  strike_interval: 50
+  underlyings:
+    - name: NIFTY
+      spot_quote: "NSE:NIFTY 50"
+      strikes_each_side: 10
+      strike_interval: 50
+    - name: BANKNIFTY
+      spot_quote: "NSE:NIFTY BANK"
+      strikes_each_side: 10
+      strike_interval: 100
+
+# Index futures: near + next month for each underlying.
+futures:
+  exchange: NFO
+  underlyings:
+    - NIFTY
+    - BANKNIFTY
+  contract_count: 2  # near + next
+  subscribe_mode: full
 
 # Ingestion: how often to flush buffered ticks to Parquet.
 ingestion:
   flush_interval_seconds: 45
   flush_max_rows: 5000
-  websocket_mode: full  # 'full' = 5-level depth; requires market depth subscription
+  # Per-instrument modes come from the cache (full vs quote); this is the default for depth set.
+  websocket_mode: full
+
+# After-close compaction of per-minute ticks into one file per symbol/day.
+compaction:
+  # If true, move ticks_*.parquet into {symbol}/_minute_parts/ after successful compact.
+  archive_minute_files: false
+  archive_subdir: _minute_parts
 
 # Historical candle backfill defaults.
 historical:
   interval: 5minute
   lookback_days: 30
 
-# OI buildup bucket size (used in Stage 2+).
+# Feature engineering (Stage 2+).
 features:
   oi_bucket_minutes: 5
+  # Reject a tick if |return| vs previous LTP exceeds this percent (equity / futures / index).
+  max_tick_return_pct: 5.0
+  # Options premiums move more (Gamma); separate looser cap. Later: moneyness/IV-aware.
+  options_max_tick_return_pct: 25.0
+  # Annualization day-count for futures basis (calendar days to expiry).
+  basis_days_per_year: 365
 
-# Signal horizon — placeholder until you define custom horizon (Stage 3+).
+# Signal / labeling (Stage 3).
+# Vertical barrier = candle_interval_minutes.
+# label_mode: triple_barrier (active) | next_candle_close_vs_current (legacy flat, comparison only)
 signal:
-  horizon_minutes: 15
-  threshold_pct: 0.25
+  candle_interval_minutes: 5
+  threshold_pct: 0.15
+  label_mode: triple_barrier
+  triple_barrier:
+    vol_method: ewma          # ewma | rolling_std
+    vol_window: 20            # lookback / ewma span in 5-min returns
+    barrier_multiplier: 1.0   # thr = realized_vol × multiplier (vol as decimal)
+    min_threshold_pct: 0.05   # floor
+    max_threshold_pct: 5.0    # cap
+    path_rule: close_vs_barriers
+    # Phase B hook only — not implemented yet.
+    options_label_mode: raw_premium   # future: delta_residual
+  # Min prior returns required before trusting dynamic vol (else floor).
+  vol_min_periods: 5
 
 # Walk-forward backtest windows (Stage 4+).
 backtest:

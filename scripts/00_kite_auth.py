@@ -11,6 +11,11 @@ Usage:
 
 Non-interactive cache refresh (existing valid access_token in .env):
   python scripts/00_kite_auth.py --refresh-cache
+
+Membership refresh triggers:
+  - This script (login and --refresh-cache) always rebuilds NSE constituent CSVs
+  - Ingestion startup refreshes CSVs if membership snapshot is older than
+    universe.membership_max_age_days
 """
 
 from __future__ import annotations
@@ -33,23 +38,48 @@ from nse_pipeline.broker.auth import (  # noqa: E402
 from nse_pipeline.broker.instruments import (  # noqa: E402
     fetch_index_instruments,
     refresh_instrument_cache,
+    tokens_by_subscribe_mode,
 )
 from nse_pipeline.config import load_settings  # noqa: E402
 
 
 def _print_cache_summary(cache: dict, cache_path: Path) -> None:
-    equity_count = len(cache.get("equity", {}))
-    index_count = len(cache.get("index", {}))
-    options_count = len(cache.get("options", []))
+    counts = cache.get("counts", {})
+    membership = cache.get("membership", {})
     print(
-        f"Cached {equity_count} equity, {index_count} index, "
-        f"and {options_count} option instruments."
+        "Cached instruments: "
+        f"depth={counts.get('equity_depth', len(cache.get('equity_depth', {})))} "
+        f"quote={counts.get('equity_quote', len(cache.get('equity_quote', {})))} "
+        f"index={counts.get('index', len(cache.get('index', {})))} "
+        f"options={counts.get('options', len(cache.get('options', [])))} "
+        f"futures={counts.get('futures', len(cache.get('futures', [])))} "
+        f"total={counts.get('total', '?')}"
     )
+    if membership:
+        print(
+            "Membership: "
+            f"nifty100={membership.get('nifty100_count')} "
+            f"nifty500={membership.get('nifty500_count')} "
+            f"quote_only={membership.get('quote_only_count')} "
+            f"refreshed_at={membership.get('refreshed_at')}"
+        )
+        print(f"  nifty100 source: {membership.get('source_nifty100')}")
+        print(f"  nifty500 source: {membership.get('source_nifty500')}")
     for symbol, info in cache.get("index", {}).items():
         print(
             f"  index {symbol}: token={info.get('instrument_token')} "
             f"segment={info.get('segment')} exchange={info.get('exchange')}"
         )
+    full_tokens, quote_tokens = tokens_by_subscribe_mode(cache)
+    overlap = set(full_tokens) & set(quote_tokens)
+    print(f"Subscribe modes: full={len(full_tokens)} quote={len(quote_tokens)} overlap={len(overlap)}")
+    if cache.get("futures"):
+        print("Futures:")
+        for info in cache["futures"]:
+            print(
+                f"  {info.get('tradingsymbol')} expiry={info.get('expiry')} "
+                f"lot={info.get('lot_size')} token={info.get('instrument_token')}"
+            )
     print(f"Cache file: {cache_path}")
 
 
@@ -85,9 +115,9 @@ def refresh_cache_only() -> int:
         print(f"Smoke test failed: {exc}")
         return 1
 
-    print("\n=== Refreshing instrument cache ===")
+    print("\n=== Refreshing membership + instrument cache ===")
     try:
-        cache = refresh_instrument_cache(kite, settings)
+        cache = refresh_instrument_cache(kite, settings, force_membership=True)
         _print_cache_summary(cache, settings.paths.instruments_cache)
     except Exception as exc:
         print(f"Instrument cache refresh failed: {exc}")
@@ -143,16 +173,16 @@ def main() -> int:
 
     print("\n=== Smoke Test ===")
     try:
-        result = smoke_test_connection(kite, quote_symbol="NSE:RELIANCE")
+        result = smoke_test_connection(kite, quote_symbol="NSE:NIFTY 50")
         print(f"User: {result['user_name']} ({result['user_id']})")
         print(f"Quote {result['quote_symbol']}: LTP={result['last_price']}")
     except Exception as exc:
         print(f"Smoke test failed: {exc}")
         return 1
 
-    print("\n=== Refreshing instrument cache ===")
+    print("\n=== Refreshing membership + instrument cache ===")
     try:
-        cache = refresh_instrument_cache(kite, settings)
+        cache = refresh_instrument_cache(kite, settings, force_membership=True)
         _print_cache_summary(cache, settings.paths.instruments_cache)
     except Exception as exc:
         print(f"Instrument cache refresh failed: {exc}")

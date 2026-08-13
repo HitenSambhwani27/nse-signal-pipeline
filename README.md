@@ -55,13 +55,40 @@ python scripts/02_run_backfill.py
 
 Writes 5-minute OHLCV+OI candles to `data/raw/{date}/{symbol}/candles.parquet`.
 
-### 6. Inspect logged data
+### 6. After-close compaction (Stage 1H)
+
+Merge per-minute tick parts into one Parquet file per symbol/day, then query via DuckDB:
+
+```powershell
+python scripts/03_run_compaction.py --date 2026-08-12 --verify
+# or all dates with minute parts:
+python scripts/03_run_compaction.py --verify
+```
+
+Layout:
+
+- Raw (ingestion): `data/raw/{YYYY-MM-DD}/{symbol}/ticks_HHmm.parquet`
+- Compacted: `data/compacted/{YYYY-MM-DD}/{symbol}/ticks.parquet`
+
+Example DuckDB access from Python:
+
+```python
+from nse_pipeline.config import load_settings
+from nse_pipeline.storage.duckdb_store import DuckDBTickStore
+
+settings = load_settings()
+with DuckDBTickStore(settings) as store:
+    df = store.read_ticks("2026-08-12", "RELIANCE")
+    counts = store.tick_row_counts("2026-08-12")
+```
+
+### 7. Inspect logged data
 
 ```powershell
 python scripts/inspect_data.py
 ```
 
-### 7. Run tests
+### 8. Run tests
 
 ```powershell
 pytest
@@ -69,28 +96,27 @@ pytest
 
 ## Project layout
 
-See [PROJECT_PLAN.md](PROJECT_PLAN.md) for staged milestones. Stage 1 covers ingestion + storage only.
+See [PROJECT_PLAN.md](PROJECT_PLAN.md) for staged milestones. Stage 1G expands the universe; Stage 1H adds compaction + DuckDB before feature engineering.
 
 ## Configuration
 
-- `config/settings.yaml` — symbols, paths, flush intervals, option chain width
+- `config/settings.yaml` — universe, paths, flush intervals, signal horizon, compaction
 - `config/baseline_weights.yaml` — Phase 1 placeholder weights (Stage 3+)
 - `.env` — Kite credentials (never commit)
 
-Default equity symbols: `RELIANCE`, `HDFCBANK`, `INFY`
-
-Default options: NIFTY weekly expiry, ATM ± 10 strikes (CE + PE)
+Universe (Stage 1G): Nifty 100 full depth, Nifty 500\\Nifty 100 quote-only, Nifty + Bank Nifty options/futures, index spots.
 
 ## Daily runbook (market days)
 
-1. `python scripts/00_kite_auth.py` — refresh access token + instrument cache
+1. `python scripts/00_kite_auth.py` — refresh access token + instrument cache (+ NSE membership)
 2. `python scripts/01_run_ingestion.py` — run during market hours
 3. After close: `python scripts/02_run_backfill.py` (optional catch-up)
-4. `python scripts/inspect_data.py` — verify files and ingestion health
+4. After close: `python scripts/03_run_compaction.py --date YYYY-MM-DD --verify`
+5. `python scripts/inspect_data.py` — verify files and ingestion health
 
 ## Windows Task Scheduler (later)
 
-Stage 8 will add weekly retrain scheduling. For ingestion, create a task that runs `01_run_ingestion.py` at 9:10 IST on weekdays after auth.
+Stage 11 will add weekly retrain scheduling. For ingestion, create a task that runs `01_run_ingestion.py` at 9:10 IST on weekdays after auth. Schedule `03_run_compaction.py` after market close.
 
 ## Security
 

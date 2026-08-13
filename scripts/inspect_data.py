@@ -85,30 +85,75 @@ def main() -> int:
     if len(all_files) > 20:
         print(f"... and {len(all_files) - 20} more files")
 
-    equity_names = set(settings.equity_symbols)
-    index_names = set(settings.index_symbols)
     tick_files = [p for p in all_files if p.name.startswith("ticks_")]
 
-    equity_tick = next((p for p in tick_files if p.parent.name in equity_names), None)
+    # Prefer sampling from known folder name patterns after Stage 1G.
+    depth_tick = next(
+        (
+            p
+            for p in tick_files
+            if p.parent.name in {"RELIANCE", "HDFCBANK", "INFY", "TCS", "ITC"}
+        ),
+        None,
+    )
+    quote_tick = next(
+        (
+            p
+            for p in tick_files
+            if p.parent.name not in {"NIFTY 50", "NIFTY BANK"}
+            and not p.parent.name.startswith("NIFTY")
+            and not p.parent.name.startswith("BANKNIFTY")
+            and p.parent.name
+            not in {"RELIANCE", "HDFCBANK", "INFY", "TCS", "ITC"}
+        ),
+        None,
+    )
     option_tick = next(
         (
             p
             for p in tick_files
-            if p.parent.name.startswith("NIFTY") and p.parent.name not in index_names
+            if ("CE" in p.parent.name or "PE" in p.parent.name)
+            and (
+                p.parent.name.startswith("NIFTY")
+                or p.parent.name.startswith("BANKNIFTY")
+            )
         ),
         None,
     )
-    index_tick = next((p for p in tick_files if p.parent.name in index_names), None)
+    index_tick = next(
+        (p for p in tick_files if p.parent.name in set(settings.index_symbols)),
+        None,
+    )
+    future_tick = next(
+        (
+            p
+            for p in tick_files
+            if "FUT" in p.parent.name
+            or (
+                (p.parent.name.startswith("NIFTY") or p.parent.name.startswith("BANKNIFTY"))
+                and "CE" not in p.parent.name
+                and "PE" not in p.parent.name
+                and p.parent.name not in set(settings.index_symbols)
+            )
+        ),
+        None,
+    )
 
-    if equity_tick is not None:
-        _print_tick_schema(equity_tick, "Equity tick schema")
+    if depth_tick is not None:
+        _print_tick_schema(depth_tick, "Equity DEPTH tick schema")
     else:
-        print("\n(no equity tick file found for full schema dump)")
+        print("\n(no depth equity tick file found for full schema dump)")
+
+    if quote_tick is not None:
+        _print_tick_schema(quote_tick, "Equity QUOTE tick schema")
 
     if option_tick is not None:
         _print_tick_schema(option_tick, "Option tick schema")
     else:
         print("\n(no option tick file found for full schema dump)")
+
+    if future_tick is not None:
+        _print_tick_schema(future_tick, "Futures tick schema")
 
     if index_tick is not None:
         _print_tick_schema(index_tick, "Index tick schema")

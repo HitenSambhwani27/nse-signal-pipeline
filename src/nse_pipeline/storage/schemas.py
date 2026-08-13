@@ -80,6 +80,9 @@ class InstrumentInfo:
     instrument_type: str
     strike: float | None = None
     expiry: str | None = None
+    lot_size: int | None = None
+    # WebSocket mode for this token: 'full' (depth) or 'quote' (no depth).
+    subscribe_mode: str = "full"
 
     def to_cache_dict(self) -> dict[str, Any]:
         return {
@@ -91,6 +94,8 @@ class InstrumentInfo:
             "instrument_type": self.instrument_type,
             "strike": self.strike,
             "expiry": self.expiry,
+            "lot_size": self.lot_size,
+            "subscribe_mode": self.subscribe_mode,
         }
 
     @classmethod
@@ -104,4 +109,6 @@ class InstrumentInfo:
             instrument_type=str(data.get("instrument_type", "")),
             strike=float(data["strike"]) if data.get("strike") is not None else None,
             expiry=str(data["expiry"]) if data.get("expiry") else None,
+            lot_size=int(data["lot_size"]) if data.get("lot_size") is not None else None,
+            subscribe_mode=str(data.get("subscribe_mode", "full")),
         )

@@ -21,6 +21,7 @@ from nse_pipeline.broker.instruments import (
     all_subscribed_instruments,
     load_instrument_cache,
     token_to_symbol_map,
+    tokens_by_subscribe_mode,
 )
 from nse_pipeline.config import Settings
 from nse_pipeline.storage.parquet_writer import BufferedParquetWriter
@@ -114,7 +115,8 @@ class WebSocketIngestionService:
         self.instruments = all_subscribed_instruments(cache)
         self.token_symbol_map = token_to_symbol_map(self.instruments)
         self.exchange_by_token = {i.instrument_token: i.exchange for i in self.instruments}
-        self.tokens = [i.instrument_token for i in self.instruments]
+        self.full_tokens, self.quote_tokens = tokens_by_subscribe_mode(cache)
+        self.tokens = self.full_tokens + self.quote_tokens
 
         self._stop_event = threading.Event()
         self._connection_lost_event = threading.Event()
@@ -139,13 +141,27 @@ class WebSocketIngestionService:
         self.store.log_ingestion_event(
             event_type="connect",
             message="WebSocket connected",
-            details={"token_count": len(self.tokens)},
+            details={
+                "token_count": len(self.tokens),
+                "full_mode": len(self.full_tokens),
+                "quote_mode": len(self.quote_tokens),
+            },
         )
         self._reconnect_delay = self.settings.resilience.reconnect_initial_seconds
 
-        # Subscribe all tokens in full mode (5-level depth).
-        ws.subscribe(self.tokens)
-        ws.set_mode(ws.MODE_FULL, self.tokens)
+        # Dual-mode subscribe: Nifty 100 / F&O / spots = FULL; N500\\N100 = QUOTE.
+        if self.tokens:
+            ws.subscribe(self.tokens)
+        if self.full_tokens:
+            ws.set_mode(ws.MODE_FULL, self.full_tokens)
+        if self.quote_tokens:
+            ws.set_mode(ws.MODE_QUOTE, self.quote_tokens)
+        logger.info(
+            "Subscribed full=%s quote=%s total=%s",
+            len(self.full_tokens),
+            len(self.quote_tokens),
+            len(self.tokens),
+        )
 
     def _on_close(self, ws, code, reason) -> None:
         logger.warning("WebSocket closed: code=%s reason=%s", code, reason)

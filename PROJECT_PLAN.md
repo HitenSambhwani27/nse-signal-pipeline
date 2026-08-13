@@ -3,38 +3,43 @@
 This document mirrors the approved architecture plan and tracks implementation status.
 Authoritative decisions live in [MASTER_REFERENCE.md](MASTER_REFERENCE.md) — if anything here conflicts, MASTER wins.
 
-## Current status: Stage 1 complete (pending your live data review)
+## Current status: Stage 2 complete (2A–2E feature batch)
 
 Implemented:
 
-- Stage 0A: Project scaffold, config loader, dependencies
-- Stage 0B: Kite auth script + README setup guide
-- Stage 1A: SQLite schemas + buffered Parquet writer + tests
-- Stage 1B: Instrument resolver (equities + NIFTY weekly options)
-- Stage 1C–1E: WebSocket ingestion, reconnect, historical backfill
-- Stage 1F: `scripts/inspect_data.py` verification helper
+- Stage 0A–1F: Scaffold, auth, pilot ingestion
+- Stage 1G: Dual-mode universe (N100 depth / N500∖N100 quote / index opts+futs+spots)
+- Stage 1H: Compaction + DuckDB (`scripts/03_run_compaction.py`)
+- Stage 2A–2E: Equity/options/futures features, quality gate, batch job
+  (`scripts/04_run_features.py` → SQLite `feature_log` + `quality_log`)
 
-Not started (by design — stop after Stage 1):
+Not started:
 
-- Stage 2–6: Feature engineering, labels/baseline, backtest, Phase 2 models, live signal engine
-- Stage 7–9: Extended Kite account capture, decision/fill/outcome linkage, decision-quality algorithm
+- Stage 3–6: Labels/baseline, backtest, Phase 2 models, live signal engine
+  (incl. parked 6C ingestion-ran-today health check)
+- Stage 7–9: Account capture, decision/fill/outcome linkage, decision-quality
 - Stage 10–11: Dashboard, weekly retrain loop
+
+Daily: auth → ingest → after close compact (`03`) → features (`04`).
 
 ## Your review gate (Stage 1)
 
-Before Stage 2, verify:
+Before Stage 1G / Stage 2, verify:
 
 1. `python scripts/00_kite_auth.py` succeeds (profile + quote + instrument cache)
 2. `python scripts/01_run_ingestion.py` during market hours produces Parquet under `data/raw/`
 3. `python scripts/02_run_backfill.py` produces `candles.parquet` per symbol
-4. `python scripts/inspect_data.py` shows sensible timestamps/columns
+4. `python scripts/inspect_data.py` shows sensible timestamps/columns (full schema dumps for equity/option/index)
 5. SQLite `ingestion_meta` shows connect/flush/shutdown events
+6. `NIFTY 50` spot is subscribed and writing under `data/raw/{date}/NIFTY 50/`
 
 ## Architecture reference
 
 ```mermaid
 flowchart LR
-  Stage1[Stage1_Ingestion] --> Stage2[Stage2_Features]
+  Stage1[Stage1_Ingestion_pilot] --> Stage1G[Stage1G_Universe]
+  Stage1G --> Stage1H[Stage1H_Compact_DuckDB]
+  Stage1H --> Stage2[Stage2_Features_DQ]
   Stage2 --> Stage3[Stage3_LabelsBaseline]
   Stage3 --> Stage4[Stage4_Backtest]
   Stage4 --> Stage5[Stage5_Phase2Models]
@@ -49,12 +54,50 @@ flowchart LR
 Stage 1 already stores ticks, 5-level depth, candles, instruments, and SQLite
 `feature_log` / `signal_log` / `ingestion_meta`. Remaining Kite account/order
 capture from MASTER §2 lands in Stage 7 (Stage 1 is closed — do not reopen).
+Universe and storage-query upgrades land in Stage 1G–1H **before** Stage 2 feature work.
+
+## Confirmed universe (Stage 1G onward)
+
+| Bucket | Scope | Kite mode / notes |
+|---|---|---|
+| Equities — depth | **Nifty 100** constituents (~100) | WebSocket `MODE_FULL` (5-level depth) |
+| Equities — quote | **Nifty 500 \\ Nifty 100** (~400) — stocks in Nifty 500 that are **not** already in the depth set | WebSocket `MODE_QUOTE` — **no depth**, **no duplicate tokens** |
+| Index options | **Nifty + Bank Nifty** only | ATM ± N from settings; **no equity options** |
+| Index futures | **Nifty + Bank Nifty**, near + next month | `MODE_FULL`; expiry/lot size from live instrument master |
+| Index spot | **NIFTY 50** + **NIFTY BANK** | Live spot for Greeks / basis |
+
+Explicitly out of scope: equity options, single-stock futures (unless later scheduled).
+
+### Signal horizon (locked)
+
+Wired in `config/settings.yaml` under `signal:` (not hardcoded in labeling code):
+
+- **Active (Stage 3A):** `label_mode: triple_barrier` — vol-scaled barriers on each
+  instrument’s own 5-min return series (options: own premium). Floor/cap via
+  `min_threshold_pct` / `max_threshold_pct`. Path rule: close at T+5m vs ±thr.
+- **Legacy (comparison only):** flat ±`threshold_pct` (0.15%) next-candle close.
+- **Phase B (deferred):** `options_label_mode: delta_residual` — label residual
+  after delta-hedge vs underlying; not implemented; keep `raw_premium` for now.
+
+### Nifty 100 / 500 membership refresh (locked)
+
+Source: NSE official published constituent CSVs (via NSE archives / Nifty Indices mirrors), e.g.:
+
+- `https://archives.nseindia.com/content/indices/ind_nifty100list.csv`
+- `https://archives.nseindia.com/content/indices/ind_nifty500list.csv`
+
+**How refresh is triggered (not a one-time hardcoded list):**
+
+1. **Every instrument-cache rebuild** — `scripts/00_kite_auth.py` (interactive login **and** `--refresh-cache`) downloads fresh CSVs, then resolves Kite tokens.
+2. **Stale-on-startup** — when ingestion starts, if the on-disk membership snapshot is older than `universe.membership_max_age_days` (default 7), refresh CSVs before subscribe.
+3. **Manual / scheduled** — `python scripts/00_kite_auth.py --refresh-cache` (or a Task Scheduler weekly job calling the same path) after index rebalances.
+
+Quote-mode set is always computed as `set(Nifty500) - set(Nifty100)` after each refresh so overlap cannot accumulate.
 
 ## Open decisions (still needed from you)
 
-1. **Custom signal horizon** — before Stage 3 outcome labeling
-2. **Option chain width** — default ATM ±10 strikes (configurable in `settings.yaml`)
-3. **Reference code** — OFI, greeks.py, Phase 1 formulas (placeholders wired for now)
+1. **Option chain width** — default ATM ±10 strikes for Nifty and Bank Nifty (configurable in `settings.yaml`)
+2. **Reference code** — OFI, greeks.py, Phase 1 formulas (placeholders wired for now)
 
 ---
 
@@ -62,27 +105,96 @@ capture from MASTER §2 lands in Stage 7 (Stage 1 is closed — do not reopen).
 
 Work strictly in order after the Stage 1 review gate.
 
-### Stage 2 — Feature engineering (3 sessions)
+### Stage 1G — Universe expansion (2–3 sessions)
+
+Reconfigure subscription + instrument cache away from the Stage 1 pilot
+(3 equities + Nifty options only). Do **not** reopen Stage 1 code paths as a
+rewrite — extend resolver, settings, and subscribe lists.
+
+**1G-A — Config + membership**
+- Settings for: Nifty 100 depth, Nifty 500\\Nifty 100 quote, Nifty/Bank Nifty
+  options + futures (near+next), spot indices, locked `signal:` horizon
+- NSE constituent CSV URLs + `membership_max_age_days` in settings
+- Drop any path that would subscribe equity options
+- Document token-count / rate limits for the expanded WebSocket set
+
+**1G-B — Instrument resolver**
+- Download NSE Nifty 100 + Nifty 500 CSVs on refresh; compute
+  `quote_symbols = nifty500 - nifty100` (no overlap)
+- Resolve equity tokens from live Kite NSE master
+- Nifty + Bank Nifty option chains (ATM ± N, live expiry — never hardcoded)
+- Nifty + Bank Nifty futures: near + next month (live expiry/lot size)
+- Spot: NIFTY 50 + NIFTY BANK under cache `index`
+- Lot size / expiry / strike always from Kite `instruments()` — never hardcoded
+
+**1G-C — Dual-mode WebSocket subscription**
+- Depth set (`MODE_FULL`): Nifty 100 + options + futures + index spots
+- Quote set (`MODE_QUOTE`): Nifty 500 \\ Nifty 100 only — never also FULL
+- Backfill path covers the same universe (candles + OI where applicable)
+- Gate: cache reports counts; assert zero token overlap between modes;
+  `inspect_data` can sample one depth equity, one quote equity, one option,
+  one future, one spot
+
+### Stage 1H — Daily compaction + DuckDB query layer (2 sessions)
+
+Must complete before Stage 2 feature jobs read multi-file tick dumps.
+
+**1H-A — After-close compaction**
+- Merge per-minute `ticks_*.parquet` into **one file per symbol per day**
+  (e.g. `data/raw/{date}/{symbol}/ticks.parquet` or `data/compacted/...`)
+- Idempotent; safe to re-run; leave or archive minute files per config
+- Script + runbook step after market close (Task Scheduler later)
+
+**1H-B — DuckDB query layer**
+- DuckDB as read layer over compacted Parquet (views or thin Python helpers)
+- Stage 2+ feature jobs query via DuckDB, not ad-hoc multi-file pandas globs
+- Document partition layout + example queries in README
+
+### Stage 2 — Feature engineering (4–5 sessions)
 
 **2A — Equity features**
-- Bid/ask depth ratio, spread (absolute + bps)
-- OFI stub with formula interface documented
+- Bid/ask depth ratio, spread (absolute + bps) — depth universe (Nifty 100)
+- Quote-only path for Nifty 500 (spread/LTP/volume features without depth/OFI)
+- OFI stub with formula interface documented (depth names only)
 - VWAP deviation from session-start cumulative ticks
 
-**2B — Options features**
+**2B — Options features** (Nifty + Bank Nifty index options only)
 - OI buildup classifier (4 states) on 5-min buckets
 - PCR with buildup direction context
-- Greeks wrapper stub calling placeholder `greeks.py` interface
+- Greeks wrapper stub calling placeholder `greeks.py` interface (spot from live index)
 
-**2C — Batch job**
-- `scripts/03_run_features.py`: read day's ticks/candles → write `feature_log`
+**2C — Futures basis features** (Nifty + Bank Nifty, near + next)
+- Futures vs spot basis (absolute + bps / annualized as configured)
+- Near vs next calendar/spread basis
+- Futures OI / volume context alongside basis
+- Align timestamps to equity/option feature buckets for joint rows
+
+**2D — Data-quality gate**
+- Bad-tick filtering (stale timestamps, crossed book, impossible jumps, null/zero LTP rules)
+- Live expiry + lot-size lookup from instrument master — **never hardcoded**
+- `stock_quote_freeze` logging for per-symbol unchanged LTP+volume runs
+  (possible individual price-band / quote freeze — **not** market-wide NSE
+  circuit breaker); distinct from WebSocket disconnects
+- Gate runs before feature writes; rejected ticks counted/logged, not silently dropped without audit
+- Jump filter: equity/futures/index `max_tick_return_pct` (5%); options use separate
+  `options_max_tick_return_pct` (25%) until moneyness/IV-aware scaling exists
+
+**2E — Batch job**
+- `scripts/04_run_features.py`: read compacted day via DuckDB → write `feature_log`
+  (`03_run_compaction.py` is Stage 1H)
 - Idempotent (re-run same day replaces or upserts)
+- Applies 2D quality gate; emits equity / options / futures feature rows
 
 ### Stage 3 — Outcome labeling + baseline scorer (2 sessions)
 
-**3A — Outcome labels** (requires your signal horizon)
-- Forward-return labeler on feature timestamps
-- Populate `feature_log.actual_outcome` retrospectively
+**3A — Outcome labels** (horizon locked in settings)
+- Default: Triple-Barrier Method — thr = realized_vol × `barrier_multiplier`,
+  clipped to `[min_threshold_pct, max_threshold_pct]`; label from close at
+  T+`candle_interval_minutes` vs ±thr → up(+1)/down(−1)/flat(0)
+- Own-series vol (EWMA / rolling_std); options use premium returns, not underlying
+- `scripts/05_run_labels.py`: write `feature_log.actual_outcome` + `label_audit`;
+  `--compare-legacy` reports hourly up/down/flat and floor/cap binding rates
+- Phase B hook: `options_label_mode: delta_residual` (documented, not built)
 
 **3B — Phase 1 baseline model**
 - YAML-driven linear scoring rule (placeholder weights)
@@ -101,7 +213,7 @@ Work strictly in order after the Stage 1 review gate.
 
 ### Stage 5 — Phase 2 models (3 sessions)
 
-**5A — Logistic regression (equity + options tracks)**
+**5A — Logistic regression (equity + options + futures-aware tracks)**
 - sklearn `LogisticRegression`, standardized features
 - Save joblib with timestamp + metadata JSON
 
@@ -115,12 +227,18 @@ Work strictly in order after the Stage 1 review gate.
 ### Stage 6 — Live signal engine (2 sessions)
 
 **6A — Real-time feature compute**
-- Incremental OFI/VWAP/OI state (not full-day replay)
+- Incremental OFI/VWAP/OI/basis state (not full-day replay)
 - Load latest model, score every tick or every N seconds (config)
+- Dual-mode feed aware (depth vs quote symbols)
 
 **6B — Signal logging**
 - Write to `signal_log` with feature snapshot JSON
 - Decoupled from Streamlit
+
+**6C — Ops health (parked from Stage 1G ops note)**
+- Simple "did ingestion run today?" check (folder/meta presence under
+  `data/raw/{today}`) — ingestion currently needs a manual morning start;
+  not urgent, wire here or as a small pre-market script later
 
 ### Stage 7 — Extended Kite account capture (2 sessions)
 
@@ -232,6 +350,7 @@ From MASTER strategic pivot — designed, not yet built as separate stages:
 
 - Full `iv_history` table + IV rank/percentile / vol risk premium tracking
 - Hedge-structure payoff engine (credit spreads + iron condors)
+- Equity options / single-stock F&O (explicitly out of current universe)
 
 Stage 8–9 schema fields may reserve IV-rank context hooks; the full IV and
 payoff components wait until explicitly scheduled.
