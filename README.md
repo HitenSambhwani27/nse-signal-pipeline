@@ -13,7 +13,6 @@ Research pipeline for NSE equity order-book and Nifty options OI signals. **Does
 ### 2. Install
 
 ```powershell
-cd C:\Users\sambh\nse-signal-pipeline
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
@@ -118,7 +117,4 @@ Universe (Stage 1G): Nifty 100 full depth, Nifty 500\\Nifty 100 quote-only, Nift
 
 Stage 11 will add weekly retrain scheduling. For ingestion, create a task that runs `01_run_ingestion.py` at 9:10 IST on weekdays after auth. Schedule `03_run_compaction.py` after market close.
 
-## Security
 
-- Never commit `.env` or `data/`
-- This pipeline generates signals only — manual order placement stays with you
