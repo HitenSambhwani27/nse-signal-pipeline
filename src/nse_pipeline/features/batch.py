@@ -26,6 +26,11 @@ from nse_pipeline.features.options import (
     compute_pcr_by_bucket,
 )
 from nse_pipeline.features.quality import filter_bad_ticks
+from nse_pipeline.session_coverage import (
+    assess_session_coverage,
+    format_coverage_banner,
+    log_session_coverage,
+)
 from nse_pipeline.storage.duckdb_store import DuckDBTickStore
 from nse_pipeline.storage.sqlite_store import SQLiteStore
 
@@ -97,6 +102,11 @@ def run_feature_batch(settings: Settings, date_str: str) -> dict[str, Any]:
     ingest_halt_buffer: list[dict[str, Any]] = []
 
     with DuckDBTickStore(settings) as store:
+        coverage = assess_session_coverage(settings, date_str, store=store)
+        log_session_coverage(settings, coverage)
+        if coverage.status != "full":
+            logger.warning("PARTIAL SESSION: %s", format_coverage_banner(coverage))
+
         symbols = store.list_symbols(date_str)
         if not symbols:
             raise FileNotFoundError(
@@ -294,6 +304,8 @@ def run_feature_batch(settings: Settings, date_str: str) -> dict[str, Any]:
 
     return {
         "trade_date": date_str,
+        "coverage": coverage.to_dict(),
+        "coverage_banner": format_coverage_banner(coverage),
         "feature_rows": inserted,
         "by_track": by_track,
         "quality_rejects": sum(

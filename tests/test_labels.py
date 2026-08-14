@@ -16,6 +16,7 @@ from nse_pipeline.config import (
     OptionsSettings,
     PathsSettings,
     ResilienceSettings,
+    SessionSettings,
     Settings,
     SignalSettings,
     TripleBarrierSettings,
@@ -71,6 +72,13 @@ def _settings(tmp: Path | None = None, **tb_overrides) -> Settings:
         compaction=CompactionSettings(
             archive_minute_files=False, archive_subdir="_minute_parts"
         ),
+        session=SessionSettings(
+            timezone="Asia/Kolkata",
+            market_open="09:15",
+            market_close="15:30",
+            open_grace_minutes=15,
+            close_grace_minutes=15,
+        ),
         historical=HistoricalSettings(interval="5minute", lookback_days=1),
         features=FeaturesSettings(
             oi_bucket_minutes=5,
@@ -99,14 +107,14 @@ def test_label_from_return() -> None:
 def test_clip_threshold_floor_and_cap() -> None:
     settings = _settings()
     tb = settings.signal.triple_barrier
-    thr, floor, cap = _clip_threshold(0.01, tb)
-    assert thr == 0.05 and floor and not cap
-    thr, floor, cap = _clip_threshold(9.0, tb)
-    assert thr == 5.0 and not floor and cap
-    thr, floor, cap = _clip_threshold(None, tb)
-    assert thr == 0.05 and floor and not cap
-    thr, floor, cap = _clip_threshold(0.2, tb)
-    assert thr == 0.2 and not floor and not cap
+    thr, floor, cap, reason = _clip_threshold(0.01, tb)
+    assert thr == 0.05 and floor and not cap and reason == "below_min"
+    thr, floor, cap, reason = _clip_threshold(9.0, tb)
+    assert thr == 5.0 and not floor and cap and reason is None
+    thr, floor, cap, reason = _clip_threshold(None, tb)
+    assert thr == 0.05 and floor and not cap and reason == "missing_vol"
+    thr, floor, cap, reason = _clip_threshold(0.2, tb)
+    assert thr == 0.2 and not floor and not cap and reason is None
 
 
 def test_legacy_vs_tbm_floor_binding() -> None:

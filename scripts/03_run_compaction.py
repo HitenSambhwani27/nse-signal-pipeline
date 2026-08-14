@@ -18,6 +18,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from nse_pipeline.config import load_settings  # noqa: E402
+from nse_pipeline.session_coverage import (  # noqa: E402
+    assess_session_coverage,
+    format_coverage_banner,
+    log_session_coverage,
+)
 from nse_pipeline.storage.compaction import compact_all_dates, compact_date  # noqa: E402
 from nse_pipeline.storage.duckdb_store import DuckDBTickStore  # noqa: E402
 
@@ -56,6 +61,13 @@ def main() -> int:
         f"({total_rows} rows); skipped {len(skipped)} folders without minute parts."
     )
     print(f"Output root: {settings.paths.compacted_dir}")
+
+    # Flag partial sessions so later stages do not treat them as full days.
+    with DuckDBTickStore(settings) as store:
+        for date_str in dates:
+            coverage = assess_session_coverage(settings, date_str, store=store)
+            log_session_coverage(settings, coverage)
+            print(f"[{date_str}] {format_coverage_banner(coverage)}")
 
     if args.verify and dates:
         with DuckDBTickStore(settings) as store:

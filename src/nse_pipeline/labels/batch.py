@@ -7,8 +7,6 @@ import logging
 from collections import defaultdict
 from typing import Any
 
-import pandas as pd
-
 from nse_pipeline.broker.instruments import load_instrument_cache
 from nse_pipeline.config import Settings
 from nse_pipeline.labels.triple_barrier import (
@@ -17,6 +15,11 @@ from nse_pipeline.labels.triple_barrier import (
     label_series_legacy,
     label_series_triple_barrier,
     summarize_labels,
+)
+from nse_pipeline.session_coverage import (
+    assess_session_coverage,
+    format_coverage_banner,
+    log_session_coverage,
 )
 from nse_pipeline.storage.duckdb_store import DuckDBTickStore
 from nse_pipeline.storage.sqlite_store import SQLiteStore, _ts_iso
@@ -53,6 +56,7 @@ def run_labeling(
 
     Primary mode from settings.signal.label_mode (triple_barrier).
     If compare_legacy, also compute flat threshold_pct labels for the report.
+    Hourly legacy vs TBM comparison is only emitted for full-coverage sessions.
     """
     store_sql = SQLiteStore(settings.paths.sqlite_db)
     cache = load_instrument_cache(settings.paths.instruments_cache)
@@ -70,6 +74,7 @@ def run_labeling(
     legacy_results: list[LabelResult] = []
 
     with DuckDBTickStore(settings) as store:
+        coverage = assess_session_coverage(settings, trade_date, store=store)
         available = set(store.list_symbols(trade_date))
         for symbol in symbols:
             if symbol not in available:
@@ -103,9 +108,13 @@ def run_labeling(
                     )
                 )
 
-    tbm_by_key = {
-        (r.symbol, _ts_iso(r.timestamp)): r for r in tbm_results
-    }
+    # Hourly up/down/flat compare is the midday-flat test — only valid on full sessions.
+    hourly_compare_eligible = coverage.status == "full"
+    hourly_compare_status = (
+        "ready" if hourly_compare_eligible else "pending_full_session"
+    )
+
+    tbm_by_key = {(r.symbol, _ts_iso(r.timestamp)): r for r in tbm_results}
     updates: list[tuple[float | None, int]] = []
     matched = 0
     for row in feature_rows:
@@ -123,9 +132,14 @@ def run_labeling(
         if compare_legacy:
             store_sql.insert_label_audit(legacy_results, trade_date=trade_date)
         store_sql.update_feature_outcomes(updates)
+        log_session_coverage(settings, coverage)
 
     report: dict[str, Any] = {
         "trade_date": trade_date,
+        "coverage": coverage.to_dict(),
+        "coverage_banner": format_coverage_banner(coverage),
+        "hourly_compare_status": hourly_compare_status,
+        "hourly_compare_eligible": hourly_compare_eligible,
         "feature_rows": len(feature_rows),
         "symbols": len(symbols),
         "tbm_labels": summarize_labels(tbm_results),
@@ -193,7 +207,6 @@ def format_binding_table(summary: dict[str, Any], title: str) -> str:
             f"{100.0 * b.get('cap_bound', 0) / n:>6.1f}% "
             f"{100.0 * b.get('dynamic', 0) / n:>8.1f}%"
         )
-    n = max(summary.get("n", 0), 1)
     lines.append(
         f"{'TOTAL':>8} {summary.get('n', 0):>6} "
         f"{summary.get('floor_bound_pct', 0) or 0:>7.1f}% "

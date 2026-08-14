@@ -120,6 +120,45 @@ class DuckDBTickStore:
             rows.append({"date": date_str, "symbol": symbol, "rows": count})
         return pd.DataFrame(rows)
 
+    def tick_time_span(
+        self, date_str: str
+    ) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+        """
+        Min/max tick timestamps across compacted symbols for a date.
+
+        Uses VARCHAR cast for min/max to avoid DuckDB tz/pytz requirements on
+        timestamp aggregates; samples symbols on large days for speed.
+        """
+        symbols = self.list_symbols(date_str)
+        if not symbols:
+            return None, None
+        if len(symbols) <= 50:
+            sample = symbols
+        else:
+            step = max(1, len(symbols) // 50)
+            sample = symbols[::step]
+        first: pd.Timestamp | None = None
+        last: pd.Timestamp | None = None
+        for symbol in sample:
+            path_sql = str(self._ticks_path(date_str, symbol)).replace("\\", "/")
+            row = self._con.execute(
+                f"""
+                SELECT min(CAST(timestamp AS VARCHAR)), max(CAST(timestamp AS VARCHAR))
+                FROM read_parquet('{path_sql}')
+                """
+            ).fetchone()
+            if not row or row[0] is None:
+                continue
+            t0 = pd.Timestamp(row[0])
+            t1 = pd.Timestamp(row[1])
+            if t0.tzinfo is None:
+                t0 = t0.tz_localize("UTC")
+            if t1.tzinfo is None:
+                t1 = t1.tz_localize("UTC")
+            first = t0 if first is None or t0 < first else first
+            last = t1 if last is None or t1 > last else last
+        return first, last
+
     def scan_day_ticks(self, date_str: str) -> pd.DataFrame:
         """
         Union all compacted ticks for a date (hive-style glob).

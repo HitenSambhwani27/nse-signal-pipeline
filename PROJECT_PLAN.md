@@ -79,6 +79,17 @@ Wired in `config/settings.yaml` under `signal:` (not hardcoded in labeling code)
 - **Phase B (deferred):** `options_label_mode: delta_residual` — label residual
   after delta-hedge vs underlying; not implemented; keep `raw_premium` for now.
 
+### Session coverage (locked)
+
+- NSE cash bounds in `session:` (`09:15`–`15:30` IST, ±grace minutes).
+- Compaction / features / labeling assess first/last compacted tick span and
+  **flag `coverage=partial`** (late start and/or early end) in stdout +
+  `ingestion_meta` (`event_type=session_coverage`) + label report JSON.
+- Partial days still run the normal daily pipeline; they must **not** be treated
+  as full open-to-close equivalents in later analysis.
+- **Pending:** hourly legacy vs TBM up/down/flat comparison — only after a
+  **full** session is captured (skipped for `2026-08-13` partial midday slice).
+
 ### Nifty 100 / 500 membership refresh (locked)
 
 Source: NSE official published constituent CSVs (via NSE archives / Nifty Indices mirrors), e.g.:
@@ -193,8 +204,16 @@ Must complete before Stage 2 feature jobs read multi-file tick dumps.
   T+`candle_interval_minutes` vs ±thr → up(+1)/down(−1)/flat(0)
 - Own-series vol (EWMA / rolling_std); options use premium returns, not underlying
 - `scripts/05_run_labels.py`: write `feature_log.actual_outcome` + `label_audit`;
-  `--compare-legacy` reports hourly up/down/flat and floor/cap binding rates
+  **always** reports floor/cap binding rates (incl. `missing_vol` vs `below_min`)
+- Hourly legacy vs TBM label mix: **pending** until `coverage=full`
+  (`hourly_compare_status=pending_full_session` on partial days)
 - Phase B hook: `options_label_mode: delta_residual` (documented, not built)
+
+**3A evidence (2026-08-13 — PARTIAL coverage)**
+- Tick span ~11:55–12:06 IST → `late_start` + `early_end`; not a full session
+- Floor binding: **100%** of TBM labels (`n=1176`); all `missing_vol` (series too
+  short for `vol_min_periods`); cap **0%**; dynamic **0%**
+- Hourly legacy vs TBM comparison: **deferred** (pending full open-to-close day)
 
 **3B — Phase 1 baseline model**
 - YAML-driven linear scoring rule (placeholder weights)

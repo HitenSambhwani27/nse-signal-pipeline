@@ -61,6 +61,16 @@ compaction:
   archive_minute_files: false
   archive_subdir: _minute_parts
 
+# NSE cash session (IST). Used to flag partial-coverage days so they are not
+# treated as full open-to-close sessions in later analysis.
+session:
+  timezone: Asia/Kolkata
+  market_open: "09:15"
+  market_close: "15:30"
+  # First tick after open+grace → late_start (partial). Last tick before close-grace → early_end.
+  open_grace_minutes: 15
+  close_grace_minutes: 15
+
 # Historical candle backfill defaults.
 historical:
   interval: 5minute

@@ -49,6 +49,17 @@ class CompactionSettings:
 
 
 @dataclass
+class SessionSettings:
+    """NSE cash session bounds for partial-coverage detection."""
+
+    timezone: str
+    market_open: str  # HH:MM IST
+    market_close: str  # HH:MM IST
+    open_grace_minutes: int
+    close_grace_minutes: int
+
+
+@dataclass
 class UniverseSettings:
     nifty100_csv_url: str
     nifty500_csv_url: str
@@ -147,6 +158,7 @@ class Settings:
     futures: FuturesSettings
     ingestion: IngestionSettings
     compaction: CompactionSettings
+    session: SessionSettings
     historical: HistoricalSettings
     features: FeaturesSettings
     signal: SignalSettings
@@ -253,6 +265,15 @@ def load_settings(config_path: Path | None = None) -> Settings:
         archive_subdir=str(compaction_cfg.get("archive_subdir", "_minute_parts")),
     )
 
+    session_cfg = config.get("session", {})
+    session = SessionSettings(
+        timezone=str(session_cfg.get("timezone", "Asia/Kolkata")),
+        market_open=str(session_cfg.get("market_open", "09:15")),
+        market_close=str(session_cfg.get("market_close", "15:30")),
+        open_grace_minutes=int(session_cfg.get("open_grace_minutes", 15)),
+        close_grace_minutes=int(session_cfg.get("close_grace_minutes", 15)),
+    )
+
     historical_cfg = config["historical"]
     historical = HistoricalSettings(
         interval=str(historical_cfg["interval"]),
@@ -309,6 +330,7 @@ def load_settings(config_path: Path | None = None) -> Settings:
         futures=futures,
         ingestion=ingestion,
         compaction=compaction,
+        session=session,
         historical=historical,
         features=features,
         signal=signal,

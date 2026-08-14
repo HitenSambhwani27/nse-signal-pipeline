@@ -34,6 +34,8 @@ class LabelResult:
     cap_bound: bool
     vol: float | None
     hour_ist: int
+    # Why floor applied: missing_vol | below_min | None
+    floor_reason: str | None = None
 
 
 def _bucket_closes_from_ticks(
@@ -81,14 +83,15 @@ def _return_vol(
 def _clip_threshold(
     thr_raw_pct: float | None,
     tb: TripleBarrierSettings,
-) -> tuple[float, bool, bool]:
-    """Return (thr_used_pct, floor_bound, cap_bound)."""
+) -> tuple[float, bool, bool, str | None]:
+    """Return (thr_used_pct, floor_bound, cap_bound, floor_reason)."""
     if thr_raw_pct is None or not np.isfinite(thr_raw_pct) or thr_raw_pct <= 0:
-        return tb.min_threshold_pct, True, False
+        return tb.min_threshold_pct, True, False, "missing_vol"
     floor_bound = thr_raw_pct < tb.min_threshold_pct
     cap_bound = thr_raw_pct > tb.max_threshold_pct
     thr = float(np.clip(thr_raw_pct, tb.min_threshold_pct, tb.max_threshold_pct))
-    return thr, floor_bound, cap_bound
+    floor_reason = "below_min" if floor_bound else None
+    return thr, floor_bound, cap_bound, floor_reason
 
 
 def label_from_return(fwd_ret_pct: float, thr_pct: float) -> tuple[LabelName, float]:
@@ -141,7 +144,7 @@ def label_series_triple_barrier(
             thr_raw = float(v) * tb.barrier_multiplier * 100.0
         else:
             thr_raw = None
-        thr, floor_bound, cap_bound = _clip_threshold(thr_raw, tb)
+        thr, floor_bound, cap_bound, floor_reason = _clip_threshold(thr_raw, tb)
         name, code = label_from_return(fwd, thr)
         ts_ist = pd.Timestamp(ts).tz_convert("Asia/Kolkata")
         results.append(
@@ -159,6 +162,7 @@ def label_series_triple_barrier(
                 cap_bound=cap_bound,
                 vol=float(v) if v is not None and np.isfinite(v) else None,
                 hour_ist=int(ts_ist.hour),
+                floor_reason=floor_reason,
             )
         )
     return results
@@ -221,6 +225,10 @@ def summarize_labels(results: list[LabelResult]) -> dict[str, Any]:
             "cap_bound_n": 0,
             "floor_bound_pct": None,
             "cap_bound_pct": None,
+            "floor_missing_vol_n": 0,
+            "floor_missing_vol_pct": None,
+            "floor_below_min_n": 0,
+            "floor_below_min_pct": None,
             "dynamic_used_n": 0,
             "dynamic_used_pct": None,
             "by_hour": {},
@@ -232,6 +240,8 @@ def summarize_labels(results: list[LabelResult]) -> dict[str, Any]:
     floor_n = sum(1 for r in results if r.floor_bound)
     cap_n = sum(1 for r in results if r.cap_bound)
     dynamic_n = sum(1 for r in results if not r.floor_bound and not r.cap_bound)
+    floor_missing = sum(1 for r in results if r.floor_reason == "missing_vol")
+    floor_below = sum(1 for r in results if r.floor_reason == "below_min")
     by_hour: dict[int, dict[str, int]] = {}
     for r in results:
         bucket = by_hour.setdefault(
@@ -244,12 +254,18 @@ def summarize_labels(results: list[LabelResult]) -> dict[str, Any]:
                 "floor_bound": 0,
                 "cap_bound": 0,
                 "dynamic": 0,
+                "floor_missing_vol": 0,
+                "floor_below_min": 0,
             },
         )
         bucket[r.label] += 1
         bucket["n"] += 1
         if r.floor_bound:
             bucket["floor_bound"] += 1
+            if r.floor_reason == "missing_vol":
+                bucket["floor_missing_vol"] += 1
+            elif r.floor_reason == "below_min":
+                bucket["floor_below_min"] += 1
         elif r.cap_bound:
             bucket["cap_bound"] += 1
         else:
@@ -266,6 +282,10 @@ def summarize_labels(results: list[LabelResult]) -> dict[str, Any]:
         "cap_bound_n": cap_n,
         "floor_bound_pct": 100.0 * floor_n / n,
         "cap_bound_pct": 100.0 * cap_n / n,
+        "floor_missing_vol_n": floor_missing,
+        "floor_missing_vol_pct": 100.0 * floor_missing / n,
+        "floor_below_min_n": floor_below,
+        "floor_below_min_pct": 100.0 * floor_below / n,
         "dynamic_used_n": dynamic_n,
         "dynamic_used_pct": 100.0 * dynamic_n / n,
         "by_hour": by_hour,

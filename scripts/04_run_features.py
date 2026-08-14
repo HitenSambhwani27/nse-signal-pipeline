@@ -38,6 +38,7 @@ def main() -> int:
         return 1
 
     print(f"trade_date={summary['trade_date']}")
+    print(summary.get("coverage_banner", "coverage=unknown"))
     print(f"symbols_seen={summary['symbols_seen']}")
     print(f"feature_rows={summary['feature_rows']}")
     print(f"by_track={summary['by_track']}")

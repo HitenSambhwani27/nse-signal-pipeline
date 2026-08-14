@@ -18,6 +18,7 @@ from nse_pipeline.config import (
     OptionsSettings,
     PathsSettings,
     ResilienceSettings,
+    SessionSettings,
     Settings,
     SignalSettings,
     TripleBarrierSettings,
@@ -58,6 +59,13 @@ def _settings(tmp: Path) -> Settings:
             flush_interval_seconds=45, flush_max_rows=5000, websocket_mode="full"
         ),
         compaction=CompactionSettings(archive_minute_files=False, archive_subdir="_minute_parts"),
+        session=SessionSettings(
+            timezone="Asia/Kolkata",
+            market_open="09:15",
+            market_close="15:30",
+            open_grace_minutes=15,
+            close_grace_minutes=15,
+        ),
         historical=HistoricalSettings(interval="5minute", lookback_days=1),
         features=FeaturesSettings(
             oi_bucket_minutes=5,
