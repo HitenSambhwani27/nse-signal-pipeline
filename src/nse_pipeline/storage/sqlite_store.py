@@ -36,7 +36,9 @@ CREATE TABLE IF NOT EXISTS feature_log (
     symbol TEXT NOT NULL,
     track TEXT NOT NULL,
     features_json TEXT NOT NULL,
-    actual_outcome REAL
+    actual_outcome REAL,
+    source TEXT,
+    feature_completeness TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_feature_log_ts ON feature_log(timestamp);
@@ -45,12 +47,16 @@ CREATE INDEX IF NOT EXISTS idx_feature_log_symbol ON feature_log(symbol);
 CREATE TABLE IF NOT EXISTS signal_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT NOT NULL,
+    trade_date TEXT,
     symbol TEXT NOT NULL,
     track TEXT NOT NULL,
     model_version TEXT,
     score REAL,
     probability REAL,
-    features_json TEXT NOT NULL
+    features_json TEXT NOT NULL,
+    source TEXT,
+    attribution_json TEXT,
+    maturity_tier TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_signal_log_ts ON signal_log(timestamp);
@@ -101,6 +107,33 @@ CREATE TABLE IF NOT EXISTS label_audit (
 
 CREATE INDEX IF NOT EXISTS idx_label_audit_trade_date ON label_audit(trade_date);
 CREATE INDEX IF NOT EXISTS idx_label_audit_mode ON label_audit(mode);
+
+CREATE TABLE IF NOT EXISTS retrain_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    window_start TEXT,
+    window_end TEXT,
+    source_composition_json TEXT,
+    comparison_json TEXT,
+    promoted INTEGER NOT NULL DEFAULT 0,
+    details_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_retrain_log_ts ON retrain_log(timestamp);
+
+CREATE TABLE IF NOT EXISTS model_registry (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    track TEXT NOT NULL,
+    role TEXT NOT NULL,
+    version TEXT NOT NULL,
+    path TEXT NOT NULL,
+    harness_passed INTEGER NOT NULL DEFAULT 0,
+    metadata_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_registry_track ON model_registry(track, role, created_at);
 """
 
 
@@ -122,10 +155,31 @@ class SQLiteStore:
             }
             if "trade_date" not in cols:
                 conn.execute("ALTER TABLE feature_log ADD COLUMN trade_date TEXT")
+            if "source" not in cols:
+                conn.execute("ALTER TABLE feature_log ADD COLUMN source TEXT")
+            if "feature_completeness" not in cols:
+                conn.execute(
+                    "ALTER TABLE feature_log ADD COLUMN feature_completeness TEXT"
+                )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_feature_log_trade_date "
                 "ON feature_log(trade_date)"
             )
+            sig_cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(signal_log)").fetchall()
+            }
+            for col, sql in (
+                ("trade_date", "ALTER TABLE signal_log ADD COLUMN trade_date TEXT"),
+                ("source", "ALTER TABLE signal_log ADD COLUMN source TEXT"),
+                (
+                    "attribution_json",
+                    "ALTER TABLE signal_log ADD COLUMN attribution_json TEXT",
+                ),
+                ("maturity_tier", "ALTER TABLE signal_log ADD COLUMN maturity_tier TEXT"),
+            ):
+                if col not in sig_cols:
+                    conn.execute(sql)
 
     @contextmanager
     def connection(self) -> Generator[sqlite3.Connection, None, None]:
@@ -233,8 +287,9 @@ class SQLiteStore:
             conn.executemany(
                 """
                 INSERT INTO feature_log
-                    (timestamp, trade_date, symbol, track, features_json, actual_outcome)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (timestamp, trade_date, symbol, track, features_json,
+                     actual_outcome, source, feature_completeness)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -244,6 +299,8 @@ class SQLiteStore:
                         r["track"],
                         json.dumps(r["features"]),
                         r.get("actual_outcome"),
+                        r.get("source"),
+                        r.get("feature_completeness"),
                     )
                     for r in payload
                 ],
@@ -269,18 +326,23 @@ class SQLiteStore:
             conn.executemany(
                 """
                 INSERT INTO signal_log
-                    (timestamp, symbol, track, model_version, score, probability, features_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (timestamp, trade_date, symbol, track, model_version, score,
+                     probability, features_json, source, attribution_json, maturity_tier)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
                         r["timestamp"],
+                        r.get("trade_date"),
                         r["symbol"],
                         r["track"],
                         r.get("model_version"),
                         r.get("score"),
                         r.get("probability"),
-                        json.dumps(r["features"]),
+                        json.dumps(r.get("features") or {}),
+                        r.get("source"),
+                        json.dumps(r["attribution"]) if r.get("attribution") is not None else None,
+                        r.get("maturity_tier"),
                     )
                     for r in payload
                 ],
@@ -291,7 +353,8 @@ class SQLiteStore:
         with self.connection() as conn:
             rows = conn.execute(
                 """
-                SELECT id, timestamp, trade_date, symbol, track, features_json, actual_outcome
+                SELECT id, timestamp, trade_date, symbol, track, features_json,
+                       actual_outcome, source, feature_completeness
                 FROM feature_log
                 WHERE trade_date = ?
                 ORDER BY symbol, timestamp
@@ -304,6 +367,106 @@ class SQLiteStore:
             item["features"] = json.loads(item.pop("features_json"))
             out.append(item)
         return out
+
+    def fetch_feature_logs_range(
+        self, start_date: str, end_date: str
+    ) -> list[dict[str, Any]]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, timestamp, trade_date, symbol, track, features_json,
+                       actual_outcome, source, feature_completeness
+                FROM feature_log
+                WHERE trade_date >= ? AND trade_date <= ?
+                ORDER BY trade_date, symbol, timestamp
+                """,
+                (start_date, end_date),
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["features"] = json.loads(item.pop("features_json"))
+            out.append(item)
+        return out
+
+    def list_feature_trade_dates(self) -> list[str]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT trade_date FROM feature_log
+                WHERE trade_date IS NOT NULL
+                ORDER BY trade_date
+                """
+            ).fetchall()
+        return [str(r[0]) for r in rows]
+
+    def delete_signal_logs_for_trade_date(self, trade_date: str) -> int:
+        with self.connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM signal_log WHERE trade_date = ?", (trade_date,)
+            )
+            return int(cur.rowcount or 0)
+
+    def log_retrain_event(
+        self,
+        event_type: str,
+        *,
+        window_start: str | None = None,
+        window_end: str | None = None,
+        source_composition: dict[str, Any] | None = None,
+        comparison: dict[str, Any] | None = None,
+        promoted: bool = False,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO retrain_log (
+                    timestamp, event_type, window_start, window_end,
+                    source_composition_json, comparison_json, promoted, details_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now,
+                    event_type,
+                    window_start,
+                    window_end,
+                    json.dumps(source_composition) if source_composition else None,
+                    json.dumps(comparison) if comparison else None,
+                    1 if promoted else 0,
+                    json.dumps(details) if details else None,
+                ),
+            )
+
+    def register_model(
+        self,
+        *,
+        track: str,
+        role: str,
+        version: str,
+        path: str,
+        harness_passed: bool,
+        metadata: dict[str, Any],
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO model_registry
+                    (created_at, track, role, version, path, harness_passed, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now,
+                    track,
+                    role,
+                    version,
+                    path,
+                    1 if harness_passed else 0,
+                    json.dumps(metadata),
+                ),
+            )
 
     def update_feature_outcomes(
         self, updates: Iterable[tuple[float | None, int]]

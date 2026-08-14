@@ -14,6 +14,13 @@ options:
   oi_buildup_short: -0.30
   delta: 0.15
   gamma: 0.10
+  vwap_deviation: 0.10
+  intercept: 0.0
+
+futures:
+  basis_bps: -0.10
+  calendar_spread: 0.10
+  vwap_deviation: 0.20
   intercept: 0.0
 
 # Score above this threshold => bullish probability mapped via sigmoid in baseline.py

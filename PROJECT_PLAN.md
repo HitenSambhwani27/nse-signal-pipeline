@@ -3,24 +3,31 @@
 This document mirrors the approved architecture plan and tracks implementation status.
 Authoritative decisions live in [MASTER_REFERENCE.md](MASTER_REFERENCE.md) — if anything here conflicts, MASTER wins.
 
-## Current status: Stage 2 complete (2A–2E feature batch)
+## Current status: Fast-track Parts 1–8 implemented (full-scale backfill gated)
 
-Implemented:
+Implemented in this pass (on top of Stages 0–3A):
 
-- Stage 0A–1F: Scaffold, auth, pilot ingestion
-- Stage 1G: Dual-mode universe (N100 depth / N500∖N100 quote / index opts+futs+spots)
-- Stage 1H: Compaction + DuckDB (`scripts/03_run_compaction.py`)
-- Stage 2A–2E: Equity/options/futures features, quality gate, batch job
-  (`scripts/04_run_features.py` → SQLite `feature_log` + `quality_log`)
+- Part 1: `scripts/07_backfill_historical.py` — estimate / probe / execute into
+  Stage 1H compacted layout with `source=historical`. **Full-scale execute is
+  gated** until the minute-vs-daily request estimate is confirmed.
+- Part 2: Stage 2 feature job is source-aware (`historical_partial` vs `live_full`);
+  depth features are skipped, not null-filled, on historical OHLCV.
+- Part 3: labels accept date ranges; vol warmup from prior compacted days.
+- Part 4: `scripts/06_run_baseline.py` YAML scorer → `signal_log`.
+- Part 5: reusable walk-forward harness `scripts/08_run_backtest.py`.
+- Part 6: coarse+fine logistic + Markov + registry; models must pass the
+  Part 5 harness before live load (`scripts/09_train_models.py`).
+- Part 7: live scorer `scripts/10_run_live_signals.py` with **pooled** maturity
+  gate (cumulative live days per class, Nifty weekly vs Bank Nifty monthly separate).
+- Part 8: `scripts/11_run_retrain.py` versioned retrain, no overwrite, no auto-promote.
 
-Not started:
+Out of scope (unchanged): Stages 7–9, equity options, single-stock futures,
+**Nifty monthly options** (see TRADE_OFFS.md).
 
-- Stage 3–6: Labels/baseline, backtest, Phase 2 models, live signal engine
-  (incl. parked 6C ingestion-ran-today health check)
-- Stage 7–9: Account capture, decision/fill/outcome linkage, decision-quality
-- Stage 10–11: Dashboard, weekly retrain loop
+Daily: auth → ingest → after close compact (`03`) → features (`04`) → labels (`05`).
+Historical backfill is a one-time / incremental job (`07`), not the daily path.
 
-Daily: auth → ingest → after close compact (`03`) → features (`04`).
+Do not reopen Stage 1 ingestion.
 
 ## Your review gate (Stage 1)
 
@@ -66,7 +73,9 @@ Universe and storage-query upgrades land in Stage 1G–1H **before** Stage 2 fea
 | Index futures | **Nifty + Bank Nifty**, near + next month | `MODE_FULL`; expiry/lot size from live instrument master |
 | Index spot | **NIFTY 50** + **NIFTY BANK** | Live spot for Greeks / basis |
 
-Explicitly out of scope: equity options, single-stock futures (unless later scheduled).
+Explicitly out of scope: equity options, single-stock futures, **Nifty monthly
+options** (weekly Nifty only; Bank Nifty monthly is its only series). See
+[TRADE_OFFS.md](TRADE_OFFS.md).
 
 ### Signal horizon (locked)
 

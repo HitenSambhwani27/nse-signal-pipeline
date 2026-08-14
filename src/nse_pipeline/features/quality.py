@@ -48,18 +48,16 @@ def filter_bad_ticks(
     subscribe_mode: str,
     max_tick_return_pct: float,
     require_depth: bool = False,
+    source: str | None = None,
 ) -> QualityResult:
     """
     Filter impossible / stale / crossed-book ticks.
 
-    Rules:
-    - drop null or non-positive LTP
-    - drop non-increasing timestamps (stale/out-of-order)
-    - drop abs return vs previous kept LTP above max_tick_return_pct
-    - depth mode: drop crossed book (best bid > best ask) when both sides present
-    - freeze heuristic: long run of unchanged LTP with flat volume →
-      stock_quote_freeze flag (per-symbol quote freeze / possible individual
-      price-band limit — NOT a market-wide NSE circuit breaker; row is kept)
+    Quality-gate split:
+    - Historical OHLCV: null/non-positive close, out-of-order timestamps,
+      per-class jump threshold. Crossed-book is skipped (no book).
+    - Live ticks: all of the above plus crossed-book when depth is present.
+    Jump threshold is the same per instrument class for historical and live.
     """
     if df.empty:
         return QualityResult(clean=df.copy(), rejects=[], halt_flags=[])
@@ -120,7 +118,7 @@ def filter_bad_ticks(
                 )
                 continue
 
-        if subscribe_mode == "full" or require_depth:
+        if (subscribe_mode == "full" or require_depth) and source != "historical":
             bid = _first_level(row.get("bid_prices"))
             ask = _first_level(row.get("ask_prices"))
             if bid is not None and ask is not None and bid > ask and bid > 0 and ask > 0:

@@ -26,7 +26,8 @@ index_symbols:
   - "NIFTY 50"
   - "NIFTY BANK"
 
-# Index options only (Nifty + Bank Nifty). No equity options.
+# Index options only (Nifty weekly + Bank Nifty monthly). No equity options.
+# Nifty monthly options are out of scope — see TRADE_OFFS.md.
 options:
   exchange: NFO
   underlyings:
@@ -34,10 +35,14 @@ options:
       spot_quote: "NSE:NIFTY 50"
       strikes_each_side: 10
       strike_interval: 50
+      # weekly = Tuesday series only; never pool with monthly Nifty.
+      series: weekly
     - name: BANKNIFTY
       spot_quote: "NSE:NIFTY BANK"
       strikes_each_side: 10
       strike_interval: 100
+      # Bank Nifty weekly discontinued Nov 2024; monthly is its only series.
+      series: monthly
 
 # Index futures: near + next month for each underlying.
 futures:
@@ -71,10 +76,31 @@ session:
   open_grace_minutes: 15
   close_grace_minutes: 15
 
-# Historical candle backfill defaults.
+# Historical candle backfill (Stage 1 short lookback + Part 1 long backfill).
+# Kite historical candle endpoint: 3 requests/second. 429 → 10s cooldown.
 historical:
-  interval: 5minute
+  interval: 5minute          # used by scripts/02_run_backfill.py (Stage 1, do not change its path)
   lookback_days: 30
+  equity_start_date: "2022-01-01"
+  # Minute window for Part 1. null = full range from equity_start_date (confirm before scale).
+  # Set to 365 for "daily full-range + minute last 12 months".
+  minute_lookback_days: null
+  minute_interval: minute
+  daily_interval: day
+  rate_limit_per_second: 3.0
+  sleep_seconds: 0.40
+  retry_max: 5
+  retry_429_cooldown_seconds: 10.0
+  # Kite per-request calendar-day caps (do not exceed).
+  interval_max_days:
+    minute: 60
+    3minute: 100
+    5minute: 100
+    10minute: 100
+    15minute: 200
+    30minute: 200
+    60minute: 400
+    day: 2000
 
 # Feature engineering (Stage 2+).
 features:
@@ -105,15 +131,18 @@ signal:
   # Min prior returns required before trusting dynamic vol (else floor).
   vol_min_periods: 5
 
-# Walk-forward backtest windows (Stage 4+).
+# Walk-forward backtest windows (Stage 4+). Reusable harness — not scorer-specific.
 backtest:
   train_days: 20
   test_days: 5
   step_days: 5
   min_train_days: 5
   overfit_hit_rate_gap: 0.15  # flag if IS - OOS hit rate exceeds this
+  annualization_days: 252
+  signal_threshold: 0.0       # |score| or P(up)-0.5 gate for taking a side
 
 # Transaction costs — tune to your broker contract.
+# Options bid-ask spread-crossing is its own line item (not folded into slippage).
 costs:
   equity:
     brokerage_flat: 20.0
@@ -125,6 +154,73 @@ costs:
     stt_sell_pct: 0.0005
     slippage_ticks: 1
     tick_size: 0.05
+    spread_crossing_ticks: 1
+  futures:
+    brokerage_flat: 20.0
+    stt_sell_pct: 0.0001
+    slippage_tick: 0.05
+    slippage_pct: 0.00005
+
+# Stage 5 training — include_historical_partial is per instrument class.
+training:
+  include_historical_partial:
+    equity: true
+    options: true
+    futures: true
+  coarse_features:
+    equity:
+      - vwap_deviation_bps
+    options:
+      - pcr
+      - oi_buildup_long
+      - oi_buildup_short
+      - delta
+      - gamma
+      - vwap_deviation_bps
+    futures:
+      - basis_bps
+      - calendar_spread_near_minus_next
+      - vwap_deviation_bps
+  fine_features:
+    equity:
+      - vwap_deviation_bps
+      - depth_ratio_bid_ask
+      - spread_bps
+      - ofi_bucket_sum
+    options:
+      - pcr
+      - oi_buildup_long
+      - oi_buildup_short
+      - delta
+      - gamma
+      - depth_ratio_bid_ask
+      - ofi_bucket_sum
+    futures:
+      - basis_bps
+      - calendar_spread_near_minus_next
+      - vwap_deviation_bps
+      - depth_ratio_bid_ask
+      - ofi_bucket_sum
+  blend:
+    coarse_weight: 0.6
+    fine_weight: 0.4
+
+# Stage 6 maturity gate — POOLED cumulative live trading days per class, not per contract.
+# Nifty weekly vs Bank Nifty monthly accumulate separately (different roll cadence).
+maturity_gate:
+  suppress_below_days: 10
+  provisional_below_days: 60
+
+# Stage 6 live scoring cadence.
+live_signal:
+  score_every_seconds: 5
+
+# Weekly sliding-window retrain (Part 8). New models must pass the Part 5 harness
+# before they are eligible to replace the live pair — never auto-promote.
+retrain:
+  frequency: weekly
+  window_days: 60
+  auto_promote: false
 
 # WebSocket reconnect policy.
 resilience:

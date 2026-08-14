@@ -79,7 +79,7 @@ def compact_symbol_day(
         con.execute(
             f"""
             COPY (
-                SELECT *
+                SELECT *, 'live' AS source
                 FROM read_parquet('{glob_path}', union_by_name=true)
                 ORDER BY timestamp, instrument_token, last_price, volume
             ) TO '{out_sql}' (FORMAT PARQUET, COMPRESSION ZSTD)

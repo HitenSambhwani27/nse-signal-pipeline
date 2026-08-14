@@ -101,3 +101,41 @@ def test_quality_rejects_zero_ltp_and_crossed_book() -> None:
     assert "null_or_nonpositive_ltp" in reasons
     assert "crossed_book" in reasons
     assert len(result.clean) == 1
+
+
+def test_historical_source_skips_crossed_book() -> None:
+    """2D historical OHLCV: jump + LTP checks apply; crossed-book does not."""
+    ts0 = datetime(2026, 8, 13, 4, 0, tzinfo=timezone.utc)
+    ts1 = datetime(2026, 8, 13, 4, 1, tzinfo=timezone.utc)
+    df = pd.DataFrame(
+        [
+            {
+                "timestamp": ts0,
+                "last_price": 100.0,
+                "volume": 1,
+                "bid_prices": [101.0],
+                "ask_prices": [100.0],
+                "bid_quantities": [1],
+                "ask_quantities": [1],
+            },
+            {
+                "timestamp": ts1,
+                "last_price": 100.2,
+                "volume": 2,
+                "bid_prices": [101.0],
+                "ask_prices": [100.0],
+                "bid_quantities": [1],
+                "ask_quantities": [1],
+            },
+        ]
+    )
+    result = filter_bad_ticks(
+        df,
+        symbol="RELIANCE",
+        subscribe_mode="full",
+        max_tick_return_pct=5.0,
+        require_depth=True,
+        source="historical",
+    )
+    assert all(r.reason != "crossed_book" for r in result.rejects)
+    assert len(result.clean) == 2

@@ -24,8 +24,18 @@ from nse_pipeline.session_coverage import (
 from nse_pipeline.storage.duckdb_store import DuckDBTickStore
 from nse_pipeline.storage.sqlite_store import SQLiteStore, _ts_iso
 
+import pandas as pd
+
 
 logger = logging.getLogger(__name__)
+
+
+def _prior_trade_dates(
+    store: DuckDBTickStore, trade_date: str, *, n_days: int
+) -> list[str]:
+    """Compacted dates strictly before trade_date, oldest first, last n_days."""
+    prior = [d for d in store.list_compacted_dates() if d < trade_date]
+    return prior[-n_days:]
 
 
 def _track_for_symbol(cache: dict[str, Any], symbol: str) -> str:
@@ -75,7 +85,8 @@ def run_labeling(
 
     with DuckDBTickStore(settings) as store:
         coverage = assess_session_coverage(settings, trade_date, store=store)
-        available = set(store.list_symbols(trade_date))
+        available = set(store.list_tick_symbols(trade_date))
+        warmup_dates = _prior_trade_dates(store, trade_date, n_days=10)
         for symbol in symbols:
             if symbol not in available:
                 logger.warning(
@@ -86,15 +97,35 @@ def run_labeling(
             closes = build_five_min_closes(ticks, settings.features.oi_bucket_minutes)
             if len(closes) < 2:
                 continue
+            prior_series: list[pd.Series] = []
+            for prior in warmup_dates:
+                if symbol not in set(store.list_tick_symbols(prior)):
+                    continue
+                try:
+                    prior_closes = build_five_min_closes(
+                        store.read_ticks(prior, symbol),
+                        settings.features.oi_bucket_minutes,
+                    )
+                except FileNotFoundError:
+                    continue
+                if not prior_closes.empty:
+                    prior_series.append(prior_closes)
+            if prior_series:
+                warmed = pd.concat(prior_series + [closes])
+                warmed = warmed[~warmed.index.duplicated(keep="last")].sort_index()
+            else:
+                warmed = closes
             track = _track_for_symbol(cache, symbol)
+            emit_from = pd.Timestamp(closes.index.min())
 
             tbm_results.extend(
                 label_series_triple_barrier(
-                    closes,
+                    warmed,
                     symbol=symbol,
                     track=track,
                     horizon_bars=horizon_bars,
                     settings=settings,
+                    emit_from=emit_from,
                 )
             )
             if compare_legacy:

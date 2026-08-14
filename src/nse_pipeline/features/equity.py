@@ -82,11 +82,14 @@ def compute_equity_features(
     subscribe_mode: str,
     bucket_minutes: int = 5,
     lot_size: int | None = None,
+    source: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Build one feature row per time bucket from cleaned ticks.
 
     `subscribe_mode` is 'full' (depth) or 'quote'.
+    Historical rows skip depth-dependent features (OFI, spread, depth ratio)
+    rather than null-filling them.
     """
     if ticks.empty:
         return []
@@ -95,14 +98,42 @@ def compute_equity_features(
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     df["bucket"] = df["timestamp"].map(lambda t: _bucket_end(t, bucket_minutes))
 
-    # Session VWAP running totals.
-    qty = df["last_quantity"].fillna(0).astype(float).clip(lower=0)
-    # Prefer last_quantity; fall back to volume deltas when last_quantity is 0.
-    vol = df["volume"].fillna(0).astype(float)
-    vol_delta = vol.diff().fillna(vol.iloc[0]).clip(lower=0)
-    trade_qty = np.where(qty > 0, qty, vol_delta)
-    df["_trade_qty"] = trade_qty
-    df["_pv"] = df["last_price"].astype(float) * df["_trade_qty"]
+    inferred_source = source
+    if inferred_source is None and "source" in df.columns:
+        vals = {str(s) for s in df["source"].dropna().unique()}
+        if vals == {"historical"}:
+            inferred_source = "historical"
+        elif "live" in vals:
+            inferred_source = "live"
+        else:
+            inferred_source = "live"
+    inferred_source = inferred_source or "live"
+    skip_depth = inferred_source == "historical"
+    completeness = "historical_partial" if skip_depth else "live_full"
+    if not skip_depth and subscribe_mode != "full":
+        completeness = "live_quote"
+
+    # Session VWAP: historical uses typical price (H+L+C)/3 × volume;
+    # live uses last_quantity / volume-delta × LTP.
+    if skip_depth and {"high", "low", "close"}.issubset(df.columns):
+        typical = (
+            df["high"].astype(float) + df["low"].astype(float) + df["close"].astype(float)
+        ) / 3.0
+        trade_qty = df["volume"].fillna(0).astype(float).clip(lower=0)
+        # Minute bars already store cumulative-or-bar volume depending on Kite;
+        # prefer bar volume via diff when the series is non-decreasing.
+        vol_delta = trade_qty.diff()
+        if vol_delta.fillna(0).ge(0).all():
+            trade_qty = vol_delta.fillna(trade_qty.iloc[0]).clip(lower=0)
+        df["_trade_qty"] = trade_qty
+        df["_pv"] = typical * df["_trade_qty"]
+    else:
+        qty = df["last_quantity"].fillna(0).astype(float).clip(lower=0)
+        vol = df["volume"].fillna(0).astype(float)
+        vol_delta = vol.diff().fillna(vol.iloc[0]).clip(lower=0)
+        trade_qty = np.where(qty > 0, qty, vol_delta)
+        df["_trade_qty"] = trade_qty
+        df["_pv"] = df["last_price"].astype(float) * df["_trade_qty"]
     df["_cum_pv"] = df["_pv"].cumsum()
     df["_cum_qty"] = df["_trade_qty"].cumsum().replace(0, np.nan)
     df["vwap"] = df["_cum_pv"] / df["_cum_qty"]
@@ -110,29 +141,29 @@ def compute_equity_features(
     rows: list[dict[str, Any]] = []
     prev_bid_p = prev_bid_q = prev_ask_p = prev_ask_q = None
 
-    # Pre-compute per-tick OFI for depth mode, then aggregate in bucket.
     ofi_vals: list[float | None] = []
+    compute_depth = (not skip_depth) and subscribe_mode == "full"
     for _, row in df.iterrows():
+        if not compute_depth:
+            ofi_vals.append(None)
+            continue
         bid_p, bid_q = _level1(row.get("bid_prices"), row.get("bid_quantities"))
         ask_p, ask_q = _level1(row.get("ask_prices"), row.get("ask_quantities"))
-        if subscribe_mode == "full":
-            ofi = compute_ofi(
-                bid_price_prev=prev_bid_p,
-                bid_qty_prev=prev_bid_q,
-                ask_price_prev=prev_ask_p,
-                ask_qty_prev=prev_ask_q,
-                bid_price=bid_p,
-                bid_qty=bid_q,
-                ask_price=ask_p,
-                ask_qty=ask_q,
-            )
-            ofi_vals.append(ofi)
-            if bid_p is not None:
-                prev_bid_p, prev_bid_q = bid_p, bid_q
-            if ask_p is not None:
-                prev_ask_p, prev_ask_q = ask_p, ask_q
-        else:
-            ofi_vals.append(None)
+        ofi = compute_ofi(
+            bid_price_prev=prev_bid_p,
+            bid_qty_prev=prev_bid_q,
+            ask_price_prev=prev_ask_p,
+            ask_qty_prev=prev_ask_q,
+            bid_price=bid_p,
+            bid_qty=bid_q,
+            ask_price=ask_p,
+            ask_qty=ask_q,
+        )
+        ofi_vals.append(ofi)
+        if bid_p is not None:
+            prev_bid_p, prev_bid_q = bid_p, bid_q
+        if ask_p is not None:
+            prev_ask_p, prev_ask_q = ask_p, ask_q
     df["_ofi"] = ofi_vals
 
     track = "equity_depth" if subscribe_mode == "full" else "equity_quote"
@@ -152,9 +183,11 @@ def compute_equity_features(
             "subscribe_mode": subscribe_mode,
             "lot_size": lot_size,
             "tick_count": int(len(grp)),
+            "source": inferred_source,
+            "feature_completeness": completeness,
         }
 
-        if subscribe_mode == "full":
+        if compute_depth:
             bid_p, bid_q = _level1(last.get("bid_prices"), last.get("bid_quantities"))
             ask_p, ask_q = _level1(last.get("ask_prices"), last.get("ask_quantities"))
             spread_abs = (ask_p - bid_p) if bid_p is not None and ask_p is not None else None
@@ -177,7 +210,7 @@ def compute_equity_features(
                     "ofi_stub": True,
                 }
             )
-        else:
+        elif not skip_depth:
             features.update(
                 {
                     "best_bid": None,
@@ -189,6 +222,13 @@ def compute_equity_features(
                     "quote_only": True,
                 }
             )
+        else:
+            features["depth_features_skipped"] = [
+                "depth_ratio_bid_ask",
+                "spread_bps",
+                "spread_abs",
+                "ofi_bucket_sum",
+            ]
 
         rows.append(
             {
@@ -196,6 +236,8 @@ def compute_equity_features(
                 "trade_date": str(pd.Timestamp(bucket_ts).date()),
                 "symbol": symbol,
                 "track": track,
+                "source": inferred_source,
+                "feature_completeness": completeness,
                 "features": features,
             }
         )

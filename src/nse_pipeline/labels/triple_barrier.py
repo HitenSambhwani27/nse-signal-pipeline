@@ -109,8 +109,13 @@ def label_series_triple_barrier(
     track: str,
     horizon_bars: int,
     settings: Settings,
+    emit_from: pd.Timestamp | None = None,
 ) -> list[LabelResult]:
-    """Volatility-scaled barriers; options use own premium series (caller passes closes)."""
+    """Volatility-scaled barriers; options use own premium series (caller passes closes).
+
+    If `emit_from` is set, earlier bars are used only to warm the vol window
+    (cross-day history) and are not emitted as labels.
+    """
     tb = settings.signal.triple_barrier
     if track == "options" and tb.options_label_mode != "raw_premium":
         raise NotImplementedError(
@@ -147,6 +152,15 @@ def label_series_triple_barrier(
         thr, floor_bound, cap_bound, floor_reason = _clip_threshold(thr_raw, tb)
         name, code = label_from_return(fwd, thr)
         ts_ist = pd.Timestamp(ts).tz_convert("Asia/Kolkata")
+        if emit_from is not None:
+            emit_ts = pd.Timestamp(emit_from)
+            bar_ts = pd.Timestamp(ts)
+            if emit_ts.tzinfo is not None and bar_ts.tzinfo is None:
+                bar_ts = bar_ts.tz_localize(emit_ts.tzinfo)
+            elif bar_ts.tzinfo is not None and emit_ts.tzinfo is None:
+                emit_ts = emit_ts.tz_localize(bar_ts.tzinfo)
+            if bar_ts < emit_ts:
+                continue
         results.append(
             LabelResult(
                 symbol=symbol,

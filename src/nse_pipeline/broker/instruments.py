@@ -18,6 +18,7 @@ from typing import Any
 from kiteconnect import KiteConnect
 
 from nse_pipeline.broker.nse_membership import refresh_membership
+from nse_pipeline.broker.option_series import filter_rows_by_series
 from nse_pipeline.config import OptionUnderlyingSettings, Settings
 from nse_pipeline.storage.schemas import InstrumentInfo
 
@@ -165,7 +166,11 @@ def build_index_option_chain(
     exchange: str,
     nfo_rows: list[dict[str, Any]] | None = None,
 ) -> list[InstrumentInfo]:
-    """Build ATM ± N strikes for the nearest weekly/monthly expiry (CE + PE)."""
+    """Build ATM ± N strikes for the nearest in-scope expiry (CE + PE).
+
+    Nifty uses the configured series (weekly); Bank Nifty uses monthly (its
+    only series). Nifty monthly contracts are excluded — TRADE_OFFS.md.
+    """
     rows = nfo_rows if nfo_rows is not None else kite.instruments(exchange)
 
     option_rows: list[dict[str, Any]] = []
@@ -180,6 +185,17 @@ def build_index_option_chain(
         row_copy = dict(row)
         row_copy["_expiry_date"] = expiry
         option_rows.append(row_copy)
+
+    option_rows, series_note = filter_rows_by_series(
+        option_rows, underlying=underlying.name, series=underlying.series
+    )
+    logger.info(
+        "Option series filter %s series=%s note=%s rows=%s",
+        underlying.name,
+        underlying.series,
+        series_note,
+        len(option_rows),
+    )
 
     if not option_rows:
         raise ValueError(f"No options found for underlying {underlying.name} on {exchange}")

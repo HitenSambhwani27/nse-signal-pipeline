@@ -46,13 +46,25 @@ Writes ticks to `data/raw/{date}/{symbol}/ticks_*.parquet` and logs events to SQ
 
 Press `Ctrl+C` to stop gracefully (flushes buffers).
 
-### 5. Historical backfill
+### 5. Historical backfill (Part 1 — confirm estimate first)
+
+Stage 1 short lookback (unchanged, do not use for the 2022- range):
 
 ```powershell
 python scripts/02_run_backfill.py
 ```
 
-Writes 5-minute OHLCV+OI candles to `data/raw/{date}/{symbol}/candles.parquet`.
+Long historical pull into the compacted layout (`source=historical`):
+
+```powershell
+python scripts/07_backfill_historical.py --estimate
+# small test:
+python scripts/07_backfill_historical.py --probe RELIANCE,INFY,"NIFTY 50"
+# only after confirming scenario (a) vs (b):
+python scripts/07_backfill_historical.py --execute --start-date 2022-01-01
+```
+
+Does not overwrite live `ticks.parquet`. Daily bars go to `daily.parquet`.
 
 ### 6. After-close compaction (Stage 1H)
 
@@ -103,18 +115,48 @@ See [PROJECT_PLAN.md](PROJECT_PLAN.md) for staged milestones. Stage 1G expands t
 - `config/baseline_weights.yaml` — Phase 1 placeholder weights (Stage 3+)
 - `.env` — Kite credentials (never commit)
 
-Universe (Stage 1G): Nifty 100 full depth, Nifty 500\\Nifty 100 quote-only, Nifty + Bank Nifty options/futures, index spots.
+Universe (Stage 1G): Nifty 100 full depth, Nifty 500\\Nifty 100 quote-only,
+Nifty **weekly** options + Bank Nifty monthly options, Nifty + Bank Nifty
+futures, index spots. Nifty monthly options are out of scope ([TRADE_OFFS.md](TRADE_OFFS.md)).
+
+Every compacted / feature / signal row is tagged `source=historical` or
+`source=live`. A last-N-days query reads both; historical does not grow after
+the one-time backfill.
 
 ## Daily runbook (market days)
 
 1. `python scripts/00_kite_auth.py` — refresh access token + instrument cache (+ NSE membership)
 2. `python scripts/01_run_ingestion.py` — run during market hours
-3. After close: `python scripts/02_run_backfill.py` (optional catch-up)
-4. After close: `python scripts/03_run_compaction.py --date YYYY-MM-DD --verify`
-5. `python scripts/inspect_data.py` — verify files and ingestion health
+3. After close: `python scripts/03_run_compaction.py --date YYYY-MM-DD --verify`
+4. `python scripts/04_run_features.py --date YYYY-MM-DD`
+5. `python scripts/05_run_labels.py --date YYYY-MM-DD`
+6. Optional: `python scripts/06_run_baseline.py --start-date YYYY-MM-DD --end-date YYYY-MM-DD`
 
-## Windows Task Scheduler (later)
+One-time / incremental: `scripts/07_backfill_historical.py` (confirm `--estimate` first).
+Weekly: `scripts/11_run_retrain.py` after models exist.
 
-Stage 11 will add weekly retrain scheduling. For ingestion, create a task that runs `01_run_ingestion.py` at 9:10 IST on weekdays after auth. Schedule `03_run_compaction.py` after market close.
+## Windows Task Scheduler (local PC — now)
+
+Create these weekday tasks (all run from the repo root with the venv Python).
+Set "Start in" to the repo path. Tokens expire ~6 AM IST — auth must run first.
+
+| Task | Trigger (IST) | Command |
+|---|---|---|
+| NSE_Auth | 08:50 weekdays | `.\.venv\Scripts\python.exe scripts\00_kite_auth.py` |
+| NSE_Ingest | 09:10 weekdays (manual start still OK) | `.\.venv\Scripts\python.exe scripts\01_run_ingestion.py` |
+| NSE_Compact | 15:45 weekdays | `.\.venv\Scripts\python.exe scripts\03_run_compaction.py --verify` |
+| NSE_Features | 16:00 weekdays | `.\.venv\Scripts\python.exe scripts\04_run_features.py --date` *today* |
+| NSE_Labels | 16:30 weekdays | `.\.venv\Scripts\python.exe scripts\05_run_labels.py --date` *today* |
+| NSE_Retrain | Sunday 18:00 | `.\.venv\Scripts\python.exe scripts\11_run_retrain.py` |
+
+For `--date` tasks, wrap in a one-liner that injects today's IST date, e.g.:
+
+```powershell
+$d = (Get-Date).ToString("yyyy-MM-dd")
+.\.venv\Scripts\python.exe scripts\04_run_features.py --date $d
+```
+
+Cloud VM (Mumbai) + cron is documented as a later migration in TRADE_OFFS.md — not built now.
+
 
 

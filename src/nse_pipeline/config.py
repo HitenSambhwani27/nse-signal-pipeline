@@ -74,6 +74,9 @@ class OptionUnderlyingSettings:
     spot_quote: str
     strikes_each_side: int
     strike_interval: float
+    # weekly = Nifty Tuesday series; monthly = Bank Nifty (its only series).
+    # Nifty monthly is out of scope — see TRADE_OFFS.md.
+    series: str = "weekly"
 
 
 @dataclass
@@ -101,6 +104,26 @@ class IngestionSettings:
 class HistoricalSettings:
     interval: str
     lookback_days: int
+    equity_start_date: str = "2022-01-01"
+    minute_lookback_days: int | None = None
+    minute_interval: str = "minute"
+    daily_interval: str = "day"
+    rate_limit_per_second: float = 3.0
+    sleep_seconds: float = 0.40
+    retry_max: int = 5
+    retry_429_cooldown_seconds: float = 10.0
+    interval_max_days: dict[str, int] = field(
+        default_factory=lambda: {
+            "minute": 60,
+            "3minute": 100,
+            "5minute": 100,
+            "10minute": 100,
+            "15minute": 200,
+            "30minute": 200,
+            "60minute": 400,
+            "day": 2000,
+        }
+    )
 
 
 @dataclass
@@ -141,6 +164,66 @@ class ResilienceSettings:
 
 
 @dataclass
+class BacktestSettings:
+    train_days: int = 20
+    test_days: int = 5
+    step_days: int = 5
+    min_train_days: int = 5
+    overfit_hit_rate_gap: float = 0.15
+    annualization_days: int = 252
+    signal_threshold: float = 0.0
+
+
+@dataclass
+class InstrumentCostSettings:
+    brokerage_flat: float = 20.0
+    stt_sell_pct: float = 0.0
+    slippage_tick: float = 0.0
+    slippage_pct: float = 0.0
+    slippage_ticks: int = 0
+    tick_size: float = 0.05
+    spread_crossing_ticks: int = 0
+
+
+@dataclass
+class CostsSettings:
+    equity: InstrumentCostSettings = field(default_factory=InstrumentCostSettings)
+    options: InstrumentCostSettings = field(default_factory=InstrumentCostSettings)
+    futures: InstrumentCostSettings = field(default_factory=InstrumentCostSettings)
+
+
+@dataclass
+class TrainingSettings:
+    include_historical_partial: dict[str, bool] = field(
+        default_factory=lambda: {"equity": True, "options": True, "futures": True}
+    )
+    coarse_features: dict[str, list[str]] = field(default_factory=dict)
+    fine_features: dict[str, list[str]] = field(default_factory=dict)
+    blend_coarse_weight: float = 0.6
+    blend_fine_weight: float = 0.4
+
+
+@dataclass
+class MaturityGateSettings:
+    """Pooled live trading days per instrument class — not per contract."""
+
+    suppress_below_days: int = 10
+    provisional_below_days: int = 60
+
+
+@dataclass
+class LiveSignalSettings:
+    score_every_seconds: int = 5
+
+
+@dataclass
+class RetrainSettings:
+    frequency: str = "weekly"
+    window_days: int = 60
+    auto_promote: bool = False
+
+
+@dataclass
 class KiteCredentials:
     api_key: str
     api_secret: str
@@ -164,6 +247,12 @@ class Settings:
     signal: SignalSettings
     resilience: ResilienceSettings
     kite: KiteCredentials
+    backtest: BacktestSettings = field(default_factory=BacktestSettings)
+    costs: CostsSettings = field(default_factory=CostsSettings)
+    training: TrainingSettings = field(default_factory=TrainingSettings)
+    maturity_gate: MaturityGateSettings = field(default_factory=MaturityGateSettings)
+    live_signal: LiveSignalSettings = field(default_factory=LiveSignalSettings)
+    retrain: RetrainSettings = field(default_factory=RetrainSettings)
     raw_config: dict[str, Any] = field(repr=False, default_factory=dict)
 
     def ensure_directories(self) -> None:
@@ -230,15 +319,19 @@ def load_settings(config_path: Path | None = None) -> Settings:
     )
 
     options_cfg = config["options"]
-    underlyings = [
-        OptionUnderlyingSettings(
-            name=str(row["name"]),
-            spot_quote=str(row["spot_quote"]),
-            strikes_each_side=int(row["strikes_each_side"]),
-            strike_interval=float(row["strike_interval"]),
+    underlyings = []
+    for row in options_cfg["underlyings"]:
+        name = str(row["name"])
+        default_series = "monthly" if name.upper() == "BANKNIFTY" else "weekly"
+        underlyings.append(
+            OptionUnderlyingSettings(
+                name=name,
+                spot_quote=str(row["spot_quote"]),
+                strikes_each_side=int(row["strikes_each_side"]),
+                strike_interval=float(row["strike_interval"]),
+                series=str(row.get("series") or default_series),
+            )
         )
-        for row in options_cfg["underlyings"]
-    ]
     options = OptionsSettings(
         exchange=str(options_cfg["exchange"]),
         underlyings=underlyings,
@@ -275,9 +368,33 @@ def load_settings(config_path: Path | None = None) -> Settings:
     )
 
     historical_cfg = config["historical"]
+    minute_lb = historical_cfg.get("minute_lookback_days")
+    interval_caps = historical_cfg.get("interval_max_days") or {}
+    default_caps = {
+        "minute": 60,
+        "3minute": 100,
+        "5minute": 100,
+        "10minute": 100,
+        "15minute": 200,
+        "30minute": 200,
+        "60minute": 400,
+        "day": 2000,
+    }
+    default_caps.update({str(k): int(v) for k, v in interval_caps.items()})
     historical = HistoricalSettings(
         interval=str(historical_cfg["interval"]),
         lookback_days=int(historical_cfg["lookback_days"]),
+        equity_start_date=str(historical_cfg.get("equity_start_date", "2022-01-01")),
+        minute_lookback_days=int(minute_lb) if minute_lb is not None else None,
+        minute_interval=str(historical_cfg.get("minute_interval", "minute")),
+        daily_interval=str(historical_cfg.get("daily_interval", "day")),
+        rate_limit_per_second=float(historical_cfg.get("rate_limit_per_second", 3.0)),
+        sleep_seconds=float(historical_cfg.get("sleep_seconds", 0.40)),
+        retry_max=int(historical_cfg.get("retry_max", 5)),
+        retry_429_cooldown_seconds=float(
+            historical_cfg.get("retry_429_cooldown_seconds", 10.0)
+        ),
+        interval_max_days=default_caps,
     )
 
     features_cfg = config.get("features", {})
@@ -322,6 +439,75 @@ def load_settings(config_path: Path | None = None) -> Settings:
         access_token=os.getenv("KITE_ACCESS_TOKEN", ""),
     )
 
+    bt_cfg = config.get("backtest", {})
+    backtest = BacktestSettings(
+        train_days=int(bt_cfg.get("train_days", 20)),
+        test_days=int(bt_cfg.get("test_days", 5)),
+        step_days=int(bt_cfg.get("step_days", 5)),
+        min_train_days=int(bt_cfg.get("min_train_days", 5)),
+        overfit_hit_rate_gap=float(bt_cfg.get("overfit_hit_rate_gap", 0.15)),
+        annualization_days=int(bt_cfg.get("annualization_days", 252)),
+        signal_threshold=float(bt_cfg.get("signal_threshold", 0.0)),
+    )
+
+    def _cost_block(block: dict[str, Any] | None) -> InstrumentCostSettings:
+        b = block or {}
+        return InstrumentCostSettings(
+            brokerage_flat=float(b.get("brokerage_flat", 20.0)),
+            stt_sell_pct=float(b.get("stt_sell_pct", 0.0)),
+            slippage_tick=float(b.get("slippage_tick", 0.0)),
+            slippage_pct=float(b.get("slippage_pct", 0.0)),
+            slippage_ticks=int(b.get("slippage_ticks", 0)),
+            tick_size=float(b.get("tick_size", 0.05)),
+            spread_crossing_ticks=int(b.get("spread_crossing_ticks", 0)),
+        )
+
+    costs_cfg = config.get("costs", {})
+    costs = CostsSettings(
+        equity=_cost_block(costs_cfg.get("equity")),
+        options=_cost_block(costs_cfg.get("options")),
+        futures=_cost_block(costs_cfg.get("futures")),
+    )
+
+    tr_cfg = config.get("training", {})
+    include_hp = tr_cfg.get("include_historical_partial") or {}
+    blend_cfg = tr_cfg.get("blend") or {}
+    training = TrainingSettings(
+        include_historical_partial={
+            "equity": bool(include_hp.get("equity", True)),
+            "options": bool(include_hp.get("options", True)),
+            "futures": bool(include_hp.get("futures", True)),
+        },
+        coarse_features={
+            str(k): [str(x) for x in v]
+            for k, v in (tr_cfg.get("coarse_features") or {}).items()
+        },
+        fine_features={
+            str(k): [str(x) for x in v]
+            for k, v in (tr_cfg.get("fine_features") or {}).items()
+        },
+        blend_coarse_weight=float(blend_cfg.get("coarse_weight", 0.6)),
+        blend_fine_weight=float(blend_cfg.get("fine_weight", 0.4)),
+    )
+
+    mg_cfg = config.get("maturity_gate", {})
+    maturity_gate = MaturityGateSettings(
+        suppress_below_days=int(mg_cfg.get("suppress_below_days", 10)),
+        provisional_below_days=int(mg_cfg.get("provisional_below_days", 60)),
+    )
+
+    ls_cfg = config.get("live_signal", {})
+    live_signal = LiveSignalSettings(
+        score_every_seconds=int(ls_cfg.get("score_every_seconds", 5)),
+    )
+
+    rt_cfg = config.get("retrain", {})
+    retrain = RetrainSettings(
+        frequency=str(rt_cfg.get("frequency", "weekly")),
+        window_days=int(rt_cfg.get("window_days", 60)),
+        auto_promote=bool(rt_cfg.get("auto_promote", False)),
+    )
+
     settings = Settings(
         paths=paths,
         universe=universe,
@@ -336,6 +522,12 @@ def load_settings(config_path: Path | None = None) -> Settings:
         signal=signal,
         resilience=resilience,
         kite=kite,
+        backtest=backtest,
+        costs=costs,
+        training=training,
+        maturity_gate=maturity_gate,
+        live_signal=live_signal,
+        retrain=retrain,
         raw_config=config,
     )
     settings.ensure_directories()

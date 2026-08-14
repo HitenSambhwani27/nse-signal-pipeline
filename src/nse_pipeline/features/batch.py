@@ -42,6 +42,37 @@ UNDERLYING_SPOT = {
     "BANKNIFTY": "NIFTY BANK",
 }
 
+DEPTH_FEATURES_SKIPPED = (
+    "depth_ratio_bid_ask",
+    "spread_bps",
+    "spread_abs",
+    "ofi_bucket_sum",
+)
+
+
+def _infer_source(ticks: pd.DataFrame) -> str:
+    if ticks is None or ticks.empty or "source" not in ticks.columns:
+        return "live"
+    vals = {str(s) for s in ticks["source"].dropna().unique()}
+    if vals == {"historical"}:
+        return "historical"
+    return "live"
+
+
+def _stamp_source(rows: list[dict[str, Any]], source: str) -> None:
+    completeness = "historical_partial" if source == "historical" else "live_full"
+    for row in rows:
+        row["source"] = source
+        row["feature_completeness"] = completeness
+        feats = row.get("features") or {}
+        feats["source"] = source
+        feats["feature_completeness"] = completeness
+        if source == "historical":
+            feats["depth_features_skipped"] = list(DEPTH_FEATURES_SKIPPED)
+            for key in DEPTH_FEATURES_SKIPPED:
+                feats.pop(key, None)
+        row["features"] = feats
+
 
 def _spot_series_by_bucket(
     store: DuckDBTickStore,
@@ -107,10 +138,11 @@ def run_feature_batch(settings: Settings, date_str: str) -> dict[str, Any]:
         if coverage.status != "full":
             logger.warning("PARTIAL SESSION: %s", format_coverage_banner(coverage))
 
-        symbols = store.list_symbols(date_str)
+        symbols = store.list_tick_symbols(date_str)
         if not symbols:
             raise FileNotFoundError(
-                f"No compacted ticks for {date_str}. Run scripts/03_run_compaction.py first."
+                f"No compacted ticks for {date_str}. Run scripts/03_run_compaction.py "
+                "or scripts/07_backfill_historical.py first."
             )
 
         spot_cache = {
@@ -124,13 +156,15 @@ def run_feature_batch(settings: Settings, date_str: str) -> dict[str, Any]:
             mode: str,
             require_depth: bool,
             max_tick_return_pct: float,
+            source: str = "live",
         ) -> pd.DataFrame:
             result = filter_bad_ticks(
                 ticks,
                 symbol=symbol,
                 subscribe_mode=mode,
                 max_tick_return_pct=max_tick_return_pct,
-                require_depth=require_depth,
+                require_depth=require_depth and source != "historical",
+                source=source,
             )
             for rej in result.rejects:
                 quality_buffer.append(
@@ -168,23 +202,26 @@ def run_feature_batch(settings: Settings, date_str: str) -> dict[str, Any]:
             info = meta.get(symbol)
             if not info or info.get("bucket_kind") != "equity":
                 continue
+            ticks = store.read_ticks(date_str, symbol)
+            source = _infer_source(ticks)
             mode = str(info.get("subscribe_mode", "quote"))
             clean = apply_quality(
-                store.read_ticks(date_str, symbol),
+                ticks,
                 symbol,
                 mode,
                 mode == "full",
                 max_jump,
+                source,
             )
-            feature_rows.extend(
-                compute_equity_features(
-                    clean,
-                    symbol=symbol,
-                    subscribe_mode=mode,
-                    bucket_minutes=bucket_minutes,
-                    lot_size=info.get("lot_size"),
-                )
+            eq_rows = compute_equity_features(
+                clean,
+                symbol=symbol,
+                subscribe_mode=mode,
+                bucket_minutes=bucket_minutes,
+                lot_size=info.get("lot_size"),
+                source=source,
             )
+            feature_rows.extend(eq_rows)
 
         option_symbols = [
             s for s in symbols if meta.get(s, {}).get("bucket_kind") == "options"
@@ -193,39 +230,42 @@ def run_feature_batch(settings: Settings, date_str: str) -> dict[str, Any]:
         option_meta: dict[str, dict[str, Any]] = {}
         for symbol in option_symbols:
             info = meta[symbol]
+            ticks = store.read_ticks(date_str, symbol)
+            source = _infer_source(ticks)
             clean = apply_quality(
-                store.read_ticks(date_str, symbol),
+                ticks,
                 symbol,
                 "full",
                 False,
                 options_max_jump,
+                source,
             )
             option_buckets[symbol] = bucket_option_series(
                 clean, bucket_minutes=bucket_minutes
             )
-            option_meta[symbol] = info
+            option_meta[symbol] = {**info, "_source": source}
 
         pcr_by_underlying = compute_pcr_by_bucket(option_buckets, option_meta)
         for symbol, buckets in option_buckets.items():
             info = option_meta[symbol]
             underlying = str(info.get("underlying") or info.get("name"))
             spot_sym = UNDERLYING_SPOT.get(underlying, "NIFTY 50")
-            feature_rows.extend(
-                compute_option_features_for_symbol(
-                    buckets,
-                    symbol=symbol,
-                    underlying=underlying,
-                    option_type=str(
-                        info.get("option_type") or info.get("instrument_type")
-                    ),
-                    strike=info.get("strike"),
-                    expiry=info.get("expiry"),
-                    lot_size=info.get("lot_size"),
-                    spot_by_bucket=spot_cache.get(spot_sym, {}),
-                    pcr_by_bucket=pcr_by_underlying.get(underlying, {}),
-                    bucket_minutes=bucket_minutes,
-                )
+            opt_rows = compute_option_features_for_symbol(
+                buckets,
+                symbol=symbol,
+                underlying=underlying,
+                option_type=str(
+                    info.get("option_type") or info.get("instrument_type")
+                ),
+                strike=info.get("strike"),
+                expiry=info.get("expiry"),
+                lot_size=info.get("lot_size"),
+                spot_by_bucket=spot_cache.get(spot_sym, {}),
+                pcr_by_bucket=pcr_by_underlying.get(underlying, {}),
+                bucket_minutes=bucket_minutes,
             )
+            _stamp_source(opt_rows, str(info.get("_source") or "live"))
+            feature_rows.extend(opt_rows)
 
         fut_symbols = [
             s for s in symbols if meta.get(s, {}).get("bucket_kind") == "futures"
@@ -237,13 +277,18 @@ def run_feature_batch(settings: Settings, date_str: str) -> dict[str, Any]:
             ].append(symbol)
 
         fut_buckets: dict[str, pd.DataFrame] = {}
+        fut_source: dict[str, str] = {}
         for symbol in fut_symbols:
+            ticks = store.read_ticks(date_str, symbol)
+            source = _infer_source(ticks)
+            fut_source[symbol] = source
             clean = apply_quality(
-                store.read_ticks(date_str, symbol),
+                ticks,
                 symbol,
                 "full",
                 False,
                 max_jump,
+                source,
             )
             fut_buckets[symbol] = bucket_futures_series(
                 clean, bucket_minutes=bucket_minutes
@@ -273,21 +318,21 @@ def run_feature_batch(settings: Settings, date_str: str) -> dict[str, Any]:
             )
             spot_sym = UNDERLYING_SPOT.get(underlying, "NIFTY 50")
             for symbol in ordered:
-                feature_rows.extend(
-                    compute_futures_features(
-                        fut_buckets[symbol],
-                        symbol=symbol,
-                        underlying=underlying,
-                        expiry=meta[symbol].get("expiry"),
-                        lot_size=meta[symbol].get("lot_size"),
-                        spot_by_bucket=spot_cache.get(spot_sym, {}),
-                        near_ltp_by_bucket=near_map,
-                        next_ltp_by_bucket=next_map,
-                        is_near=(symbol == near_sym),
-                        bucket_minutes=bucket_minutes,
-                        basis_days_per_year=settings.features.basis_days_per_year,
-                    )
+                fut_rows = compute_futures_features(
+                    fut_buckets[symbol],
+                    symbol=symbol,
+                    underlying=underlying,
+                    expiry=meta[symbol].get("expiry"),
+                    lot_size=meta[symbol].get("lot_size"),
+                    spot_by_bucket=spot_cache.get(spot_sym, {}),
+                    near_ltp_by_bucket=near_map,
+                    next_ltp_by_bucket=next_map,
+                    is_near=(symbol == near_sym),
+                    bucket_minutes=bucket_minutes,
+                    basis_days_per_year=settings.features.basis_days_per_year,
                 )
+                _stamp_source(fut_rows, fut_source.get(symbol, "live"))
+                feature_rows.extend(fut_rows)
 
     store_sql.delete_feature_logs_for_trade_date(date_str)
     store_sql.delete_quality_logs_for_trade_date(date_str)
@@ -299,8 +344,14 @@ def run_feature_batch(settings: Settings, date_str: str) -> dict[str, Any]:
 
     inserted = store_sql.insert_feature_logs(feature_rows)
     by_track: dict[str, int] = {}
+    by_completeness: dict[str, int] = {}
+    by_source: dict[str, int] = {}
     for row in feature_rows:
         by_track[row["track"]] = by_track.get(row["track"], 0) + 1
+        comp = str(row.get("feature_completeness") or "unknown")
+        by_completeness[comp] = by_completeness.get(comp, 0) + 1
+        src = str(row.get("source") or "unknown")
+        by_source[src] = by_source.get(src, 0) + 1
 
     return {
         "trade_date": date_str,
@@ -308,6 +359,8 @@ def run_feature_batch(settings: Settings, date_str: str) -> dict[str, Any]:
         "coverage_banner": format_coverage_banner(coverage),
         "feature_rows": inserted,
         "by_track": by_track,
+        "by_source": by_source,
+        "by_completeness": by_completeness,
         "quality_rejects": sum(
             1 for e in quality_buffer if e["event_type"] == "quality_reject"
         ),

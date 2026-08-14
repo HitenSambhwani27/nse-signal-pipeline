@@ -63,6 +63,17 @@ class DuckDBTickStore:
         return sorted(
             p.name
             for p in day.iterdir()
+            if p.is_dir()
+            and ((p / "ticks.parquet").exists() or (p / "daily.parquet").exists())
+        )
+
+    def list_tick_symbols(self, date_str: str) -> list[str]:
+        day = self.compacted_dir / date_str
+        if not day.exists():
+            return []
+        return sorted(
+            p.name
+            for p in day.iterdir()
             if p.is_dir() and (p / "ticks.parquet").exists()
         )
 
@@ -110,7 +121,7 @@ class DuckDBTickStore:
     def tick_row_counts(self, date_str: str) -> pd.DataFrame:
         """Return symbol, row_count for all compacted symbols on a date."""
         rows: list[dict[str, Any]] = []
-        for symbol in self.list_symbols(date_str):
+        for symbol in self.list_tick_symbols(date_str):
             path_sql = str(self._ticks_path(date_str, symbol)).replace("\\", "/")
             count = int(
                 self._con.execute(
@@ -129,7 +140,7 @@ class DuckDBTickStore:
         Uses VARCHAR cast for min/max to avoid DuckDB tz/pytz requirements on
         timestamp aggregates; samples symbols on large days for speed.
         """
-        symbols = self.list_symbols(date_str)
+        symbols = self.list_tick_symbols(date_str)
         if not symbols:
             return None, None
         if len(symbols) <= 50:
