@@ -1,4 +1,4 @@
-"""Rate-limited Kite historical_data fetch with 429 backoff."""
+"""Rate-limited Kite historical_data fetch with 429/timeout backoff."""
 
 from __future__ import annotations
 
@@ -12,6 +12,10 @@ from nse_pipeline.config import HistoricalSettings
 from nse_pipeline.storage.schemas import CandleRecord, InstrumentInfo
 
 logger = logging.getLogger(__name__)
+
+
+class HistoricalAuthError(RuntimeError):
+    """Kite token/auth failure — not retryable; abort the backfill."""
 
 
 class HistoricalRateLimiter:
@@ -45,6 +49,72 @@ def _is_rate_limit(exc: BaseException) -> bool:
     return "too many" in text or "429" in text
 
 
+def _is_timeout(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    name = type(exc).__name__.lower()
+    if "timeout" in name or "timed out" in text or "read timed out" in text:
+        return True
+    if "504" in text or "gateway time" in text:
+        return True
+    return False
+
+
+def _is_auth_error(exc: BaseException) -> bool:
+    """Kite TokenException / 401 / 403 / invalid access_token — do not retry."""
+    if isinstance(exc, HistoricalAuthError):
+        return True
+    name = type(exc).__name__.lower()
+    if "tokenexception" in name or name == "tokenerror":
+        return True
+    code = getattr(exc, "code", None)
+    if code in {401, 403}:
+        return True
+    text = str(exc).lower()
+    needles = (
+        "incorrect `api_key`",
+        "incorrect api_key",
+        "invalid token",
+        "token expired",
+        "access_token` is invalid",
+        "access token is invalid",
+        "tokenexception",
+    )
+    if any(n in text for n in needles):
+        return True
+    if "forbidden" in text and "token" in text:
+        return True
+    return False
+
+
+def _is_transient(exc: BaseException) -> bool:
+    if _is_rate_limit(exc) or _is_timeout(exc):
+        return True
+    text = str(exc).lower()
+    code = getattr(exc, "code", None)
+    if code in {502, 503, 504}:
+        return True
+    return any(
+        token in text
+        for token in ("connection", "temporarily", "unavailable", "502", "503")
+    )
+
+
+def attempt_timeout(historical: HistoricalSettings, attempt: int) -> float:
+    """Raise HTTP timeout toward the ceiling on later attempts."""
+    base = float(historical.http_timeout_seconds)
+    ceiling = float(historical.http_timeout_ceiling_seconds)
+    # attempt 1 → base, 2 → base*1.5, 3 → base*2, ... capped
+    scaled = base * (1.0 + 0.5 * (attempt - 1))
+    return min(max(scaled, base), ceiling)
+
+
+def attempt_backoff(historical: HistoricalSettings, attempt: int) -> float:
+    """Exponential backoff *after* a failed attempt, before the next try."""
+    base = float(historical.retry_backoff_seconds)
+    mult = float(historical.retry_backoff_multiplier)
+    return base * (mult ** (attempt - 1))
+
+
 def fetch_candles_with_retry(
     kite: KiteConnect,
     instrument: InstrumentInfo,
@@ -57,10 +127,14 @@ def fetch_candles_with_retry(
     """
     One Kite historical_data call with retry.
 
-    Logs empty returns honestly — never pads with synthetic bars.
+    Timeouts, 429s, and other transient errors retry with exponential backoff
+    and a raised HTTP timeout so later attempts are not identical resends.
+    Empty returns are logged honestly — never padded with synthetic bars.
     """
     last_exc: BaseException | None = None
     for attempt in range(1, historical.retry_max + 1):
+        timeout_s = attempt_timeout(historical, attempt)
+        kite.timeout = timeout_s
         limiter.wait()
         try:
             raw = kite.historical_data(
@@ -71,33 +145,64 @@ def fetch_candles_with_retry(
                 continuous=False,
                 oi=True,
             )
-        except Exception as exc:  # kiteconnect raises typed exceptions; keep broad
+        except Exception as exc:
             last_exc = exc
-            if _is_rate_limit(exc):
-                cooldown = historical.retry_429_cooldown_seconds * attempt
-                logger.warning(
-                    "429 on %s %s %s→%s attempt %s; cooldown %.1fs",
+            if _is_auth_error(exc):
+                logger.error(
+                    "Kite AUTH FAILURE %s %s %s→%s attempt %s/%s: %s "
+                    "(not retrying; abort the backfill and re-auth with "
+                    "scripts/00_kite_auth.py)",
                     instrument.tradingsymbol,
                     interval,
                     from_date,
                     to_date,
                     attempt,
-                    cooldown,
+                    historical.retry_max,
+                    exc,
                 )
-                time.sleep(cooldown)
-                continue
+                raise HistoricalAuthError(
+                    f"Kite auth/token failure for {instrument.tradingsymbol} "
+                    f"{interval} {from_date}→{to_date}: {exc}"
+                ) from exc
+            retryable = _is_transient(exc)
+            if attempt >= historical.retry_max or not retryable:
+                logger.warning(
+                    "historical_data failed %s %s %s→%s attempt %s/%s "
+                    "timeout=%.1fs retryable=%s: %s",
+                    instrument.tradingsymbol,
+                    interval,
+                    from_date,
+                    to_date,
+                    attempt,
+                    historical.retry_max,
+                    timeout_s,
+                    retryable,
+                    exc,
+                )
+                if retryable:
+                    break
+                raise
+
+            if _is_rate_limit(exc):
+                backoff = historical.retry_429_cooldown_seconds * attempt
+            else:
+                backoff = attempt_backoff(historical, attempt)
             logger.warning(
-                "historical_data failed %s %s %s→%s: %s",
+                "historical_data retry %s %s %s→%s attempt %s/%s "
+                "timeout=%.1fs backoff=%.1fs kind=%s: %s",
                 instrument.tradingsymbol,
                 interval,
                 from_date,
                 to_date,
+                attempt,
+                historical.retry_max,
+                timeout_s,
+                backoff,
+                "429" if _is_rate_limit(exc) else "timeout" if _is_timeout(exc) else "transient",
                 exc,
             )
-            if attempt < historical.retry_max:
-                time.sleep(historical.sleep_seconds * attempt)
-                continue
-            raise
+            time.sleep(backoff)
+            continue
 
         candles: list[CandleRecord] = []
         for row in raw or []:

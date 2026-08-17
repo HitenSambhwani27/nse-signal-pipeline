@@ -102,14 +102,34 @@ and cron, once the local pipeline is trusted. Do not dual-run.
 
 ---
 
-## Pending confirmation: Part 1 minute granularity
+## Corporate-action adjustment — deferred (why scenario (b))
 
-Full-scale `07 --execute` is gated on choosing:
+Kite historical OHLCV is **not** split/bonus adjusted. A 1:2 split shows up as
+an overnight close-to-open gap of ~50%. Full point-in-time corporate-action
+adjustment (NSE CA feed → back-adjust or forward-adjust prices, volumes, and
+barriers) is **not built**.
 
-- **(a)** 1-minute bars for equities+spot from 2022-01-01 (~14.6k minute requests,
-  ~1.7–3.4 hours), or
-- **(b)** daily for the full range plus 1-minute for the last 365 days (~3.5k
-  minute requests, ~30–60 minutes).
+What exists now: a cheap quality-gate **flag** on equity historical rows.
+Overnight |close→open| ≥ `features.corporate_action_gap_pct` (15%) with **no**
+corresponding index-wide move (`features.corporate_action_index_wide_pct`, 5%)
+is written to `quality_log` as `corporate_action_suspect` and stamped on that
+day's feature rows. Rows are **kept** — not dropped, not auto-corrected.
+Manual review only.
 
-Set `historical.minute_lookback_days` to `365` for (b), or leave `null` for (a).
+This is why Part 1 is running **scenario (b)** (daily 2022→present + 1-minute
+last 365 days) instead of (a) (1-minute back to 2022-01-01). Deeper minute
+history multiplies unadjusted split/bonus distortions in VWAP, returns, vol
+windows, and labels. One year of minute bars is enough to stand up the engine
+while the CA problem stays bounded.
+
+**Trigger to revisit:** before any backfill deeper than 365 days of minute
+bars. Do not expand `historical.minute_lookback_days` past 365 until a real
+CA adjuster exists.
+
+---
+
+## Minute granularity — decided: scenario (b)
+
+`historical.minute_lookback_days: 365`. Daily OHLCV still covers 2022-01-01
+forward. See the corporate-action entry above for the reason.
 ---

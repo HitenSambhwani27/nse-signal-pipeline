@@ -170,3 +170,78 @@ def filter_bad_ticks(
 
     clean = work.loc[keep_mask].reset_index(drop=True)
     return QualityResult(clean=clean, rejects=rejects, halt_flags=halt_flags)
+
+
+def session_open_price(df: pd.DataFrame) -> float | None:
+    """First bar open (historical OHLC) or first last_price."""
+    if df is None or df.empty:
+        return None
+    first = df.sort_values("timestamp").iloc[0]
+    if "open" in df.columns and pd.notna(first.get("open")):
+        val = float(first["open"])
+        if val > 0:
+            return val
+    ltp = first.get("last_price")
+    if ltp is not None and pd.notna(ltp) and float(ltp) > 0:
+        return float(ltp)
+    return None
+
+
+def session_close_price(df: pd.DataFrame) -> float | None:
+    """Last bar close (historical OHLC) or last last_price."""
+    if df is None or df.empty:
+        return None
+    last = df.sort_values("timestamp").iloc[-1]
+    if "close" in df.columns and pd.notna(last.get("close")):
+        val = float(last["close"])
+        if val > 0:
+            return val
+    ltp = last.get("last_price")
+    if ltp is not None and pd.notna(ltp) and float(ltp) > 0:
+        return float(ltp)
+    return None
+
+
+def assess_overnight_gap(
+    *,
+    prev_close: float,
+    today_open: float,
+    index_prev_close: float | None,
+    index_today_open: float | None,
+    gap_pct: float,
+    index_wide_pct: float,
+) -> dict[str, Any] | None:
+    """
+    Flag a stock-specific overnight gap for manual review.
+
+    Does not drop or adjust prices. Returns None if the gap is below threshold
+    or the index moved enough to count as market-wide.
+    """
+    if prev_close <= 0 or today_open <= 0:
+        return None
+    stock_gap = (today_open / prev_close - 1.0) * 100.0
+    if abs(stock_gap) < gap_pct:
+        return None
+    index_gap: float | None = None
+    if (
+        index_prev_close is not None
+        and index_today_open is not None
+        and index_prev_close > 0
+        and index_today_open > 0
+    ):
+        index_gap = (index_today_open / index_prev_close - 1.0) * 100.0
+        if abs(index_gap) >= index_wide_pct:
+            return None
+    return {
+        "reason": "corporate_action_suspect",
+        "prev_close": prev_close,
+        "today_open": today_open,
+        "stock_gap_pct": stock_gap,
+        "index_gap_pct": index_gap,
+        "gap_threshold_pct": gap_pct,
+        "index_wide_pct": index_wide_pct,
+        "note": (
+            "Overnight close-to-open gap with no corresponding index-wide move. "
+            "Flagged for manual review — not dropped, not auto-adjusted."
+        ),
+    }

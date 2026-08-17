@@ -139,3 +139,39 @@ def test_historical_source_skips_crossed_book() -> None:
     )
     assert all(r.reason != "crossed_book" for r in result.rejects)
     assert len(result.clean) == 2
+
+
+def test_overnight_gap_flags_stock_not_index_move() -> None:
+    from nse_pipeline.features.quality import assess_overnight_gap
+
+    hit = assess_overnight_gap(
+        prev_close=100.0,
+        today_open=80.0,
+        index_prev_close=24500.0,
+        index_today_open=24550.0,
+        gap_pct=15.0,
+        index_wide_pct=5.0,
+    )
+    assert hit is not None
+    assert hit["reason"] == "corporate_action_suspect"
+    assert abs(hit["stock_gap_pct"] + 20.0) < 1e-9
+
+    market = assess_overnight_gap(
+        prev_close=100.0,
+        today_open=80.0,
+        index_prev_close=24500.0,
+        index_today_open=22000.0,
+        gap_pct=15.0,
+        index_wide_pct=5.0,
+    )
+    assert market is None
+
+    small = assess_overnight_gap(
+        prev_close=100.0,
+        today_open=99.0,
+        index_prev_close=24500.0,
+        index_today_open=24550.0,
+        gap_pct=15.0,
+        index_wide_pct=5.0,
+    )
+    assert small is None

@@ -112,6 +112,10 @@ class HistoricalSettings:
     sleep_seconds: float = 0.40
     retry_max: int = 5
     retry_429_cooldown_seconds: float = 10.0
+    http_timeout_seconds: float = 45.0
+    http_timeout_ceiling_seconds: float = 90.0
+    retry_backoff_seconds: float = 2.0
+    retry_backoff_multiplier: float = 2.0
     interval_max_days: dict[str, int] = field(
         default_factory=lambda: {
             "minute": 60,
@@ -132,6 +136,8 @@ class FeaturesSettings:
     max_tick_return_pct: float
     options_max_tick_return_pct: float
     basis_days_per_year: int
+    corporate_action_gap_pct: float = 15.0
+    corporate_action_index_wide_pct: float = 5.0
 
 
 @dataclass
@@ -394,6 +400,14 @@ def load_settings(config_path: Path | None = None) -> Settings:
         retry_429_cooldown_seconds=float(
             historical_cfg.get("retry_429_cooldown_seconds", 10.0)
         ),
+        http_timeout_seconds=float(historical_cfg.get("http_timeout_seconds", 45.0)),
+        http_timeout_ceiling_seconds=float(
+            historical_cfg.get("http_timeout_ceiling_seconds", 90.0)
+        ),
+        retry_backoff_seconds=float(historical_cfg.get("retry_backoff_seconds", 2.0)),
+        retry_backoff_multiplier=float(
+            historical_cfg.get("retry_backoff_multiplier", 2.0)
+        ),
         interval_max_days=default_caps,
     )
 
@@ -405,6 +419,12 @@ def load_settings(config_path: Path | None = None) -> Settings:
             features_cfg.get("options_max_tick_return_pct", 25.0)
         ),
         basis_days_per_year=int(features_cfg.get("basis_days_per_year", 365)),
+        corporate_action_gap_pct=float(
+            features_cfg.get("corporate_action_gap_pct", 15.0)
+        ),
+        corporate_action_index_wide_pct=float(
+            features_cfg.get("corporate_action_index_wide_pct", 5.0)
+        ),
     )
 
     signal_cfg = config["signal"]

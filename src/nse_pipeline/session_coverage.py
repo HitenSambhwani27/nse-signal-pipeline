@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, time, timedelta
+from collections.abc import Iterable
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
@@ -17,6 +18,13 @@ import pandas as pd
 from nse_pipeline.config import SessionSettings, Settings
 from nse_pipeline.storage.duckdb_store import DuckDBTickStore
 from nse_pipeline.storage.sqlite_store import SQLiteStore
+
+# Live-pilot capture from the start of this project — always excluded from
+# baseline and walk-forward, regardless of which job last wrote session_coverage.
+LIVE_PILOT_TRADE_DATES = frozenset({"2026-08-13"})
+# Equity source=live days shorter than this are treated as incomplete live slices,
+# not full live sessions. Muhurat (historical, ~1h) is not live and is kept.
+_LIVE_PARTIAL_MAX_HOURS = 2.0
 
 
 CoverageStatus = Literal["full", "partial", "unknown"]
@@ -61,14 +69,78 @@ def expected_bounds(
     return open_dt, open_deadline, close_earliest, close_dt
 
 
+def _cash_session_symbols(settings: Settings, listed: list[str]) -> list[str]:
+    """Equity + index names present that day. F&O contracts are ignored.
+
+    Coverage is a cash-session property. Using whichever symbols a job sampled
+    (e.g. two option names with a full historical span) made 2026-08-13 look
+    full during FO labeling while quote features correctly marked it partial.
+    """
+    cache_path = settings.paths.instruments_cache
+    if not cache_path.exists():
+        return []
+    from nse_pipeline.broker.instruments import load_instrument_cache
+
+    cache = load_instrument_cache(cache_path)
+    cash = set(cache.get("equity_depth") or {})
+    cash.update(cache.get("equity_quote") or {})
+    cash.update(cache.get("index") or {})
+    return [s for s in listed if s in cash]
+
+
+def scoring_skip_trade_dates(rows: Iterable[dict[str, Any]]) -> set[str]:
+    """Dates baseline and walk-forward must not treat as normal full sessions.
+
+    Always skips 2026-08-13 (live-pilot). Also skips any date whose equity
+    rows are source=live and span less than two hours. Historical partials
+    such as Muhurat 2025-10-21 are kept.
+    """
+    by_date: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        d = str(row.get("trade_date") or "")
+        if d:
+            by_date.setdefault(d, []).append(row)
+    skip = {d for d in by_date if d in LIVE_PILOT_TRADE_DATES}
+    for trade_date, date_rows in by_date.items():
+        if trade_date in skip:
+            continue
+        equity = [
+            r
+            for r in date_rows
+            if str(r.get("track") or "").startswith("equity")
+            and str(r.get("source") or "") == "live"
+        ]
+        if not equity:
+            continue
+        stamps: list[pd.Timestamp] = []
+        for r in equity:
+            ts = r.get("timestamp")
+            if ts is None:
+                continue
+            t = pd.Timestamp(ts)
+            stamps.append(t)
+        if len(stamps) < 2:
+            skip.add(trade_date)
+            continue
+        span_h = (max(stamps) - min(stamps)).total_seconds() / 3600.0
+        if span_h < _LIVE_PARTIAL_MAX_HOURS:
+            skip.add(trade_date)
+    return skip
+
+
 def assess_session_coverage(
     settings: Settings,
     trade_date: str,
     *,
     store: DuckDBTickStore | None = None,
+    symbols: list[str] | None = None,
 ) -> SessionCoverage:
     """
     Classify trade_date as full vs partial from compacted tick span.
+
+    Uses cash-session (equity + index) symbols when the instrument cache
+    exists, so FO vs equity jobs cannot disagree. If the cache is absent
+    (unit tests), falls back to ``symbols`` or all compacted names.
 
     late_start: first tick after market_open + open_grace
     early_end: last tick before market_close - close_grace
@@ -81,8 +153,14 @@ def assess_session_coverage(
     owns_store = store is None
     duck = store or DuckDBTickStore(settings)
     try:
-        symbols = duck.list_symbols(trade_date)
-        if not symbols:
+        listed = duck.list_tick_symbols(trade_date)
+        cash = _cash_session_symbols(settings, listed)
+        if cash:
+            listed = cash
+        elif symbols is not None:
+            allow = set(symbols)
+            listed = [s for s in listed if s in allow]
+        if not listed:
             return SessionCoverage(
                 trade_date=trade_date,
                 status="unknown",
@@ -95,7 +173,7 @@ def assess_session_coverage(
                 close_grace_minutes=session.close_grace_minutes,
                 symbols_sampled=0,
             )
-        first_ts, last_ts = duck.tick_time_span(trade_date)
+        first_ts, last_ts = duck.tick_time_span(trade_date, symbols=listed)
     finally:
         if owns_store:
             duck.close()
@@ -111,7 +189,7 @@ def assess_session_coverage(
             market_close_ist=close_dt.isoformat(),
             open_grace_minutes=session.open_grace_minutes,
             close_grace_minutes=session.close_grace_minutes,
-            symbols_sampled=len(symbols),
+            symbols_sampled=len(listed),
         )
 
     first_ist = pd.Timestamp(first_ts).tz_convert(session.timezone).to_pydatetime()
@@ -140,7 +218,7 @@ def assess_session_coverage(
         market_close_ist=close_dt.isoformat(),
         open_grace_minutes=session.open_grace_minutes,
         close_grace_minutes=session.close_grace_minutes,
-        symbols_sampled=len(symbols),
+        symbols_sampled=len(listed),
     )
 
 

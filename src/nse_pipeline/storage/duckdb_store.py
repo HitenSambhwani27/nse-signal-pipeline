@@ -132,15 +132,17 @@ class DuckDBTickStore:
         return pd.DataFrame(rows)
 
     def tick_time_span(
-        self, date_str: str
+        self, date_str: str, symbols: list[str] | None = None
     ) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
         """
         Min/max tick timestamps across compacted symbols for a date.
 
         Uses VARCHAR cast for min/max to avoid DuckDB tz/pytz requirements on
         timestamp aggregates; samples symbols on large days for speed.
+        Pass `symbols` to avoid opening parquet for unrelated names (e.g. while
+        another process is still writing other symbols' files).
         """
-        symbols = self.list_tick_symbols(date_str)
+        symbols = list(symbols) if symbols is not None else self.list_tick_symbols(date_str)
         if not symbols:
             return None, None
         if len(symbols) <= 50:
@@ -185,3 +187,53 @@ class DuckDBTickStore:
             ORDER BY symbol, timestamp
             """
         )
+
+    def _daily_path(self, date_str: str, symbol: str) -> Path:
+        return self.compacted_dir / date_str / symbol / "daily.parquet"
+
+    def close_on(self, date_str: str, symbol: str) -> float | None:
+        """Last close for a symbol on a date (ticks, else daily.parquet)."""
+        from nse_pipeline.features.quality import session_close_price
+
+        ticks_path = self._ticks_path(date_str, symbol)
+        if ticks_path.exists():
+            try:
+                df = self.read_ticks(date_str, symbol)
+            except FileNotFoundError:
+                df = pd.DataFrame()
+            px = session_close_price(df)
+            if px is not None:
+                return px
+        daily = self._daily_path(date_str, symbol)
+        if daily.exists():
+            df = pd.read_parquet(daily)
+            return session_close_price(df)
+        return None
+
+    def open_on(self, date_str: str, symbol: str) -> float | None:
+        from nse_pipeline.features.quality import session_open_price
+
+        ticks_path = self._ticks_path(date_str, symbol)
+        if ticks_path.exists():
+            try:
+                df = self.read_ticks(date_str, symbol)
+            except FileNotFoundError:
+                df = pd.DataFrame()
+            px = session_open_price(df)
+            if px is not None:
+                return px
+        daily = self._daily_path(date_str, symbol)
+        if daily.exists():
+            df = pd.read_parquet(daily)
+            return session_open_price(df)
+        return None
+
+    def last_close_before(self, date_str: str, symbol: str) -> float | None:
+        """Most recent close strictly before date_str (ticks or daily)."""
+        for prior in reversed(self.list_compacted_dates()):
+            if prior >= date_str:
+                continue
+            px = self.close_on(prior, symbol)
+            if px is not None:
+                return px
+        return None

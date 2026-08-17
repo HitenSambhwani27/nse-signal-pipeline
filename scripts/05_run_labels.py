@@ -35,6 +35,10 @@ def main() -> int:
     parser.add_argument("--start-date", help="Inclusive start YYYY-MM-DD")
     parser.add_argument("--end-date", help="Inclusive end YYYY-MM-DD")
     parser.add_argument(
+        "--tracks",
+        help="Comma-separated tracks to label (e.g. equity_depth,equity_quote)",
+    )
+    parser.add_argument(
         "--compare-legacy",
         action="store_true",
         default=True,
@@ -63,6 +67,11 @@ def main() -> int:
     )
     settings = load_settings()
     compare = not args.no_compare_legacy
+    tracks = (
+        tuple(part.strip() for part in args.tracks.split(",") if part.strip())
+        if args.tracks
+        else None
+    )
 
     if args.start_date or args.end_date:
         from nse_pipeline.storage.sqlite_store import SQLiteStore
@@ -91,10 +100,15 @@ def main() -> int:
                 date_str,
                 write_outcomes=not args.no_write,
                 compare_legacy=compare,
+                tracks=tracks,
             )
         except Exception as exc:
             print(f"[{date_str}] Labeling failed: {exc}")
             exit_code = 1
+            continue
+
+        if report.get("skipped"):
+            print(f"[{date_str}] skipped ({report.get('reason')})")
             continue
 
         tbm = report["tbm_labels"]

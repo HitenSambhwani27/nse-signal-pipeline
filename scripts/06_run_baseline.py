@@ -24,15 +24,28 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Stage 3B baseline scorer")
     parser.add_argument("--start-date", required=True)
     parser.add_argument("--end-date", required=True)
+    parser.add_argument(
+        "--tracks",
+        help="Comma-separated tracks to score (e.g. equity_depth,equity_quote)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     settings = load_settings()
-    summary = run_baseline_scorer(settings, args.start_date, args.end_date)
+    tracks = (
+        tuple(part.strip() for part in args.tracks.split(",") if part.strip())
+        if args.tracks
+        else None
+    )
+    summary = run_baseline_scorer(
+        settings, args.start_date, args.end_date, tracks=tracks
+    )
     print(f"scored={summary['scored']}")
     print(f"by_track={summary['by_track']}")
     print(f"by_source={summary['by_source']}")
     print(f"by_completeness={summary['by_completeness']}")
+    if summary.get("skipped_dates"):
+        print(f"skipped_dates={summary['skipped_dates']}")
     return 0
 
 

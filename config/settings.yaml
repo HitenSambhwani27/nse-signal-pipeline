@@ -82,15 +82,22 @@ historical:
   interval: 5minute          # used by scripts/02_run_backfill.py (Stage 1, do not change its path)
   lookback_days: 30
   equity_start_date: "2022-01-01"
-  # Minute window for Part 1. null = full range from equity_start_date (confirm before scale).
-  # Set to 365 for "daily full-range + minute last 12 months".
-  minute_lookback_days: null
+  # Scenario (b): daily for the full range + 1-minute for the last 365 days.
+  # Chosen over (a) because full corporate-action adjustment is not built yet
+  # (see TRADE_OFFS.md). Trigger to go deeper: before any backfill > 365 days.
+  minute_lookback_days: 365
   minute_interval: minute
   daily_interval: day
   rate_limit_per_second: 3.0
   sleep_seconds: 0.40
   retry_max: 5
   retry_429_cooldown_seconds: 10.0
+  # KiteConnect HTTP timeout (library default is 7s — too short for minute bars).
+  # Forum consensus: 30s+; we start at 45s and raise toward the ceiling on retries.
+  http_timeout_seconds: 45.0
+  http_timeout_ceiling_seconds: 90.0
+  retry_backoff_seconds: 2.0
+  retry_backoff_multiplier: 2.0
   # Kite per-request calendar-day caps (do not exceed).
   interval_max_days:
     minute: 60
@@ -111,6 +118,10 @@ features:
   options_max_tick_return_pct: 25.0
   # Annualization day-count for futures basis (calendar days to expiry).
   basis_days_per_year: 365
+  # Overnight close-to-open gap on historical equities: flag for review, do not
+  # drop or auto-adjust. Index move at/above index_wide_pct counts as market-wide.
+  corporate_action_gap_pct: 15.0
+  corporate_action_index_wide_pct: 5.0
 
 # Signal / labeling (Stage 3).
 # Vertical barrier = candle_interval_minutes.

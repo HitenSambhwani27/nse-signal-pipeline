@@ -188,8 +188,9 @@ class SQLiteStore:
 
         'with' blocks auto-close resources — like C# 'using' statements.
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000")
         try:
             yield conn
             conn.commit()
@@ -265,46 +266,72 @@ class SQLiteStore:
             results.append(item)
         return results
 
-    def delete_feature_logs_for_trade_date(self, trade_date: str) -> int:
+    def delete_feature_logs_for_trade_date(
+        self, trade_date: str, symbols: list[str] | None = None
+    ) -> int:
         with self.connection() as conn:
-            cur = conn.execute(
-                "DELETE FROM feature_log WHERE trade_date = ?", (trade_date,)
-            )
+            if symbols is None:
+                cur = conn.execute(
+                    "DELETE FROM feature_log WHERE trade_date = ?", (trade_date,)
+                )
+            elif not symbols:
+                return 0
+            else:
+                placeholders = ",".join("?" * len(symbols))
+                cur = conn.execute(
+                    f"DELETE FROM feature_log WHERE trade_date = ? AND symbol IN ({placeholders})",
+                    (trade_date, *symbols),
+                )
             return int(cur.rowcount or 0)
 
-    def delete_quality_logs_for_trade_date(self, trade_date: str) -> int:
+    def delete_quality_logs_for_trade_date(
+        self, trade_date: str, symbols: list[str] | None = None
+    ) -> int:
         with self.connection() as conn:
-            cur = conn.execute(
-                "DELETE FROM quality_log WHERE trade_date = ?", (trade_date,)
-            )
+            if symbols is None:
+                cur = conn.execute(
+                    "DELETE FROM quality_log WHERE trade_date = ?", (trade_date,)
+                )
+            elif not symbols:
+                return 0
+            else:
+                placeholders = ",".join("?" * len(symbols))
+                cur = conn.execute(
+                    f"DELETE FROM quality_log WHERE trade_date = ? AND symbol IN ({placeholders})",
+                    (trade_date, *symbols),
+                )
             return int(cur.rowcount or 0)
 
     def insert_feature_logs(self, rows: Iterable[dict[str, Any]]) -> int:
         payload = list(rows)
         if not payload:
             return 0
+        chunk_size = 500
         with self.connection() as conn:
-            conn.executemany(
-                """
-                INSERT INTO feature_log
-                    (timestamp, trade_date, symbol, track, features_json,
-                     actual_outcome, source, feature_completeness)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        r["timestamp"],
-                        r.get("trade_date"),
-                        r["symbol"],
-                        r["track"],
-                        json.dumps(r["features"]),
-                        r.get("actual_outcome"),
-                        r.get("source"),
-                        r.get("feature_completeness"),
-                    )
-                    for r in payload
-                ],
-            )
+            for offset in range(0, len(payload), chunk_size):
+                chunk = payload[offset : offset + chunk_size]
+                conn.executemany(
+                    """
+                    INSERT INTO feature_log
+                        (timestamp, trade_date, symbol, track, features_json,
+                         actual_outcome, source, feature_completeness)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            r["timestamp"],
+                            r.get("trade_date"),
+                            r["symbol"],
+                            r["track"],
+                            json.dumps(r["features"]),
+                            r.get("actual_outcome"),
+                            r.get("source"),
+                            r.get("feature_completeness"),
+                        )
+                        for r in chunk
+                    ],
+                )
+                conn.commit()
         return len(payload)
 
     def count_features(self, trade_date: str | None = None) -> int:
@@ -400,11 +427,20 @@ class SQLiteStore:
             ).fetchall()
         return [str(r[0]) for r in rows]
 
-    def delete_signal_logs_for_trade_date(self, trade_date: str) -> int:
+    def delete_signal_logs_for_trade_date(
+        self, trade_date: str, tracks: tuple[str, ...] | None = None
+    ) -> int:
         with self.connection() as conn:
-            cur = conn.execute(
-                "DELETE FROM signal_log WHERE trade_date = ?", (trade_date,)
-            )
+            if tracks:
+                placeholders = ",".join("?" * len(tracks))
+                cur = conn.execute(
+                    f"DELETE FROM signal_log WHERE trade_date = ? AND track IN ({placeholders})",
+                    (trade_date, *tracks),
+                )
+            else:
+                cur = conn.execute(
+                    "DELETE FROM signal_log WHERE trade_date = ?", (trade_date,)
+                )
             return int(cur.rowcount or 0)
 
     def log_retrain_event(
@@ -481,11 +517,20 @@ class SQLiteStore:
             )
         return len(payload)
 
-    def clear_label_audit(self, trade_date: str) -> int:
+    def clear_label_audit(
+        self, trade_date: str, tracks: tuple[str, ...] | None = None
+    ) -> int:
         with self.connection() as conn:
-            cur = conn.execute(
-                "DELETE FROM label_audit WHERE trade_date = ?", (trade_date,)
-            )
+            if tracks:
+                placeholders = ",".join("?" * len(tracks))
+                cur = conn.execute(
+                    f"DELETE FROM label_audit WHERE trade_date = ? AND track IN ({placeholders})",
+                    (trade_date, *tracks),
+                )
+            else:
+                cur = conn.execute(
+                    "DELETE FROM label_audit WHERE trade_date = ?", (trade_date,)
+                )
             return int(cur.rowcount or 0)
 
     def insert_label_audit(

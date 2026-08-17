@@ -20,6 +20,7 @@ import pandas as pd
 from nse_pipeline.backtest.costs import cost_breakdown, round_trip_cost_pct
 from nse_pipeline.backtest.metrics import summarize_trades
 from nse_pipeline.config import Settings
+from nse_pipeline.session_coverage import scoring_skip_trade_dates
 from nse_pipeline.storage.sqlite_store import SQLiteStore
 
 Scorer = Callable[[dict[str, Any]], float]
@@ -115,6 +116,7 @@ def run_walk_forward(
     rows: list[dict[str, Any]] | None = None,
     model_id: str = "anonymous",
     output_dir: Path | None = None,
+    tracks: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """
     Rolling train/test evaluation. The scorer is applied out-of-sample on each
@@ -131,8 +133,13 @@ def run_walk_forward(
         if not dates:
             raise FileNotFoundError("No feature_log dates in the requested window.")
         rows = store.fetch_feature_logs_range(dates[0], dates[-1])
-    else:
-        dates = sorted({str(r.get("trade_date")) for r in rows if r.get("trade_date")})
+    if tracks:
+        wanted = set(tracks)
+        rows = [r for r in rows if str(r.get("track")) in wanted]
+    skipped_dates = scoring_skip_trade_dates(rows)
+    if skipped_dates:
+        rows = [r for r in rows if str(r.get("trade_date")) not in skipped_dates]
+    dates = sorted({str(r.get("trade_date")) for r in rows if r.get("trade_date")})
 
     by_date: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -210,6 +217,8 @@ def run_walk_forward(
         "fail_reasons": reasons,
         "folds": folds,
         "self_contained": True,
+        "tracks": list(tracks) if tracks else None,
+        "skipped_dates": sorted(skipped_dates),
         "note": "No Stage 7-9 trade records are produced.",
     }
 

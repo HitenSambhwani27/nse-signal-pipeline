@@ -17,12 +17,24 @@ from kiteconnect import KiteConnect
 from nse_pipeline.config import KiteCredentials, PROJECT_ROOT, Settings
 
 
-def create_kite_client(credentials: KiteCredentials) -> KiteConnect:
-    """Create a KiteConnect SDK client from credentials."""
+def create_kite_client(
+    credentials: KiteCredentials,
+    *,
+    timeout: float | None = None,
+) -> KiteConnect:
+    """Create a KiteConnect SDK client from credentials.
+
+    `timeout` is the HTTP wait (seconds) for REST calls. Kite's library default
+    is 7s — too short for minute-level historical_data. WebSocket ingest uses
+    KiteTicker, not this timeout.
+    """
     if not credentials.api_key:
         raise ValueError("KITE_API_KEY is missing. Copy .env.example to .env and fill credentials.")
 
-    kite = KiteConnect(api_key=credentials.api_key)
+    kwargs: dict = {"api_key": credentials.api_key}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    kite = KiteConnect(**kwargs)
     if credentials.access_token:
         kite.set_access_token(credentials.access_token)
     return kite
@@ -81,13 +93,21 @@ def save_access_token_to_env(access_token: str, env_path: Path | None = None) ->
     return env_file
 
 
-def get_authenticated_kite(settings: Settings) -> KiteConnect:
-    """Return Kite client with access token set; raises if token missing."""
+def get_authenticated_kite(
+    settings: Settings,
+    *,
+    timeout: float | None = None,
+) -> KiteConnect:
+    """Return Kite client with access token set; raises if token missing.
+
+    Pass `timeout` for historical REST pulls. Stage 1 auth/ingest leave it
+    unset so the library default is unchanged.
+    """
     if not settings.kite.access_token:
         raise ValueError(
             "KITE_ACCESS_TOKEN is missing. Run: python scripts/00_kite_auth.py"
         )
-    return create_kite_client(settings.kite)
+    return create_kite_client(settings.kite, timeout=timeout)
 
 
 def smoke_test_connection(kite: KiteConnect, quote_symbol: str = "NSE:RELIANCE") -> dict:

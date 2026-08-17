@@ -30,6 +30,10 @@ def main() -> int:
     parser.add_argument("--start-date")
     parser.add_argument("--end-date")
     parser.add_argument("--model-id", default="baseline_yaml")
+    parser.add_argument(
+        "--tracks",
+        help="Comma-separated tracks (e.g. equity_depth,equity_quote or options)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -39,12 +43,18 @@ def main() -> int:
     def scorer(row: dict) -> float:
         return float(score_feature_row(row, weights)["score"])
 
+    tracks = (
+        tuple(part.strip() for part in args.tracks.split(",") if part.strip())
+        if args.tracks
+        else None
+    )
     report = run_walk_forward(
         settings,
         scorer,
         start_date=args.start_date,
         end_date=args.end_date,
         model_id=args.model_id,
+        tracks=tracks,
     )
     print(json.dumps(
         {

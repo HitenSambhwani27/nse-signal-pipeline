@@ -9,6 +9,7 @@ from typing import Any
 import yaml
 
 from nse_pipeline.config import PROJECT_ROOT, Settings
+from nse_pipeline.session_coverage import scoring_skip_trade_dates
 from nse_pipeline.storage.sqlite_store import SQLiteStore
 
 OI_LONG = {"long_buildup", "short_covering"}
@@ -119,14 +120,23 @@ def run_baseline_scorer(
     end_date: str,
     *,
     weights_path: Path | None = None,
+    tracks: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    """Idempotent per date: deletes existing baseline signal_log rows in range, then writes."""
+    """Idempotent per date/track: deletes existing baseline signal_log rows, then writes."""
     store = SQLiteStore(settings.paths.sqlite_db)
     weights = load_baseline_weights(weights_path)
     rows = store.fetch_feature_logs_range(start_date, end_date)
+    if tracks:
+        wanted = set(tracks)
+        rows = [r for r in rows if str(r.get("track")) in wanted]
+    skipped_dates = scoring_skip_trade_dates(rows)
+    if skipped_dates:
+        rows = [r for r in rows if str(r.get("trade_date")) not in skipped_dates]
+        for d in sorted(skipped_dates):
+            store.delete_signal_logs_for_trade_date(str(d), tracks=tracks)
     dates = sorted({r.get("trade_date") for r in rows if r.get("trade_date")})
     for d in dates:
-        store.delete_signal_logs_for_trade_date(str(d))
+        store.delete_signal_logs_for_trade_date(str(d), tracks=tracks)
 
     payload = [score_feature_row(r, weights) for r in rows]
     inserted = store.insert_signal_logs(payload)
@@ -146,4 +156,5 @@ def run_baseline_scorer(
         "by_track": by_track,
         "by_source": by_source,
         "by_completeness": by_completeness,
+        "skipped_dates": sorted(skipped_dates),
     }

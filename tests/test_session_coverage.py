@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -22,7 +23,7 @@ from nse_pipeline.config import (
     TripleBarrierSettings,
     UniverseSettings,
 )
-from nse_pipeline.session_coverage import assess_session_coverage
+from nse_pipeline.session_coverage import assess_session_coverage, scoring_skip_trade_dates
 
 
 def _settings(tmp: Path) -> Settings:
@@ -141,3 +142,81 @@ def test_full_session(tmp_path: Path) -> None:
     assert cov.status == "full"
     assert not cov.is_partial
     assert cov.reasons == []
+
+
+def test_coverage_uses_cash_session_not_fo_sample(tmp_path: Path) -> None:
+    """FO full-span contracts must not mark a live-pilot equity day as full."""
+    settings = _settings(tmp_path)
+    settings.paths.instruments_cache.write_text(
+        json.dumps(
+            {
+                "equity_depth": {"RELIANCE": {}},
+                "equity_quote": {},
+                "index": {},
+                "options": [],
+                "futures": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_ticks(
+        settings.paths.compacted_dir / "2026-08-13" / "RELIANCE" / "ticks.parquet",
+        "2026-08-13 11:55",
+        "2026-08-13 12:10",
+    )
+    _write_ticks(
+        settings.paths.compacted_dir / "2026-08-13" / "NIFTY26AUG25000CE" / "ticks.parquet",
+        "2026-08-13 09:15",
+        "2026-08-13 15:29",
+    )
+    cov = assess_session_coverage(
+        settings,
+        "2026-08-13",
+        symbols=["NIFTY26AUG25000CE"],
+    )
+    assert cov.status == "partial"
+    assert any("late_start" in r for r in cov.reasons)
+
+
+def test_scoring_skip_live_pilot_keeps_muhurat() -> None:
+    skip = scoring_skip_trade_dates(
+        [
+            {
+                "trade_date": "2026-08-13",
+                "track": "equity_quote",
+                "source": "live",
+                "timestamp": "2026-08-13T06:30:00+00:00",
+            },
+            {
+                "trade_date": "2026-08-13",
+                "track": "equity_quote",
+                "source": "live",
+                "timestamp": "2026-08-13T06:40:00+00:00",
+            },
+            {
+                "trade_date": "2025-10-21",
+                "track": "equity_quote",
+                "source": "historical",
+                "timestamp": "2025-10-21T08:20:00+00:00",
+            },
+            {
+                "trade_date": "2025-10-21",
+                "track": "equity_quote",
+                "source": "historical",
+                "timestamp": "2025-10-21T09:15:00+00:00",
+            },
+            {
+                "trade_date": "2026-08-14",
+                "track": "equity_quote",
+                "source": "historical",
+                "timestamp": "2026-08-14T03:45:00+00:00",
+            },
+            {
+                "trade_date": "2026-08-14",
+                "track": "equity_quote",
+                "source": "historical",
+                "timestamp": "2026-08-14T10:00:00+00:00",
+            },
+        ]
+    )
+    assert skip == {"2026-08-13"}

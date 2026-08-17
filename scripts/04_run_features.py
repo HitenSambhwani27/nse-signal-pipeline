@@ -4,13 +4,16 @@ Stage 2E — batch feature engineering over compacted ticks (DuckDB → feature_
 
 Usage:
   python scripts/04_run_features.py --date 2026-08-13
+  python scripts/04_run_features.py --start-date 2025-08-15 --end-date 2026-08-14 --tracks equity_depth
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -20,11 +23,28 @@ from nse_pipeline.config import load_settings  # noqa: E402
 from nse_pipeline.features.batch import run_feature_batch  # noqa: E402
 
 
+def _auto_workers() -> int:
+    """Leave cores for other pipeline jobs; cap at 4 sqlite-safe compute workers."""
+    n = os.cpu_count() or 2
+    return max(1, min(4, n - 2))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run Stage 2 feature batch for a date")
     parser.add_argument("--date", help="YYYY-MM-DD compacted trade date")
     parser.add_argument("--start-date", help="Inclusive start YYYY-MM-DD")
     parser.add_argument("--end-date", help="Inclusive end YYYY-MM-DD")
+    parser.add_argument(
+        "--tracks",
+        help="Comma-separated tracks to compute (e.g. equity_depth). Default: all.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="Equity symbol compute processes (0=auto, 1=sequential). "
+        "Dates still run one at a time; sqlite writes stay in the parent.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -50,22 +70,47 @@ def main() -> int:
         return 1
 
     failed = 0
-    for date_str in dates:
-        try:
-            summary = run_feature_batch(settings, date_str)
-        except Exception as exc:
-            print(f"[{date_str}] Feature batch failed: {exc}")
-            failed += 1
-            continue
-        print(f"trade_date={summary['trade_date']}")
-        print(summary.get("coverage_banner", "coverage=unknown"))
-        print(f"symbols_seen={summary['symbols_seen']}")
-        print(f"feature_rows={summary['feature_rows']}")
-        print(f"by_track={summary['by_track']}")
-        print(f"by_source={summary.get('by_source')}")
-        print(f"by_completeness={summary.get('by_completeness')}")
-        print(f"quality_rejects={summary['quality_rejects']}")
-        print(f"stock_quote_freeze_flags={summary['stock_quote_freeze_flags']}")
+    tracks = (
+        tuple(part.strip() for part in args.tracks.split(",") if part.strip())
+        if args.tracks
+        else None
+    )
+    workers = _auto_workers() if args.workers == 0 else args.workers
+    if workers < 1:
+        parser.error("--workers must be >= 1 (or 0 for auto)")
+        return 1
+    print(f"equity_symbol_workers={workers}")
+    executor = ProcessPoolExecutor(max_workers=workers) if workers > 1 else None
+    try:
+        for date_str in dates:
+            try:
+                summary = run_feature_batch(
+                    settings,
+                    date_str,
+                    tracks=tracks,
+                    workers=workers,
+                    executor=executor,
+                )
+            except Exception as exc:
+                print(f"[{date_str}] Feature batch failed: {exc}")
+                failed += 1
+                continue
+            if summary.get("skipped"):
+                print(f"[{date_str}] skipped ({summary.get('reason')})")
+                continue
+            print(f"trade_date={summary['trade_date']}")
+            print(summary.get("coverage_banner", "coverage=unknown"))
+            print(f"symbols_seen={summary['symbols_seen']}")
+            print(f"feature_rows={summary['feature_rows']}")
+            print(f"by_track={summary['by_track']}")
+            print(f"by_source={summary.get('by_source')}")
+            print(f"by_completeness={summary.get('by_completeness')}")
+            print(f"quality_rejects={summary['quality_rejects']}")
+            print(f"stock_quote_freeze_flags={summary['stock_quote_freeze_flags']}")
+            print(f"corporate_action_flags={summary.get('corporate_action_flags', 0)}")
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True)
     return 1 if failed else 0
 
 

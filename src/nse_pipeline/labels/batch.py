@@ -60,6 +60,7 @@ def run_labeling(
     *,
     write_outcomes: bool = True,
     compare_legacy: bool = True,
+    tracks: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """
     Label feature_log rows for trade_date using compacted tick closes.
@@ -74,17 +75,34 @@ def run_labeling(
     horizon_bars = max(1, horizon_minutes // settings.features.oi_bucket_minutes)
 
     feature_rows = store_sql.fetch_feature_logs(trade_date)
+    if tracks:
+        wanted = set(tracks)
+        feature_rows = [r for r in feature_rows if str(r.get("track")) in wanted]
     if not feature_rows:
-        raise FileNotFoundError(
-            f"No feature_log rows for {trade_date}. Run scripts/04_run_features.py first."
-        )
+        return {
+            "trade_date": trade_date,
+            "skipped": True,
+            "reason": "no_feature_rows_for_tracks",
+            "feature_rows": 0,
+            "feature_rows_matched": 0,
+            "coverage_banner": "coverage=skipped",
+            "hourly_compare_status": "skipped",
+            "hourly_compare_eligible": False,
+            "tbm_labels": {"n": 0},
+            "tbm_by_track": {},
+        }
 
     symbols = sorted({r["symbol"] for r in feature_rows})
     tbm_results: list[LabelResult] = []
     legacy_results: list[LabelResult] = []
 
     with DuckDBTickStore(settings) as store:
-        coverage = assess_session_coverage(settings, trade_date, store=store)
+        coverage = assess_session_coverage(
+            settings,
+            trade_date,
+            store=store,
+            symbols=sorted({r["symbol"] for r in feature_rows}),
+        )
         available = set(store.list_tick_symbols(trade_date))
         warmup_dates = _prior_trade_dates(store, trade_date, n_days=10)
         for symbol in symbols:
@@ -152,13 +170,12 @@ def run_labeling(
         key = (row["symbol"], _ts_iso(row["timestamp"]))
         hit = tbm_by_key.get(key)
         if hit is None:
-            updates.append((None, row["id"]))
-        else:
-            matched += 1
-            updates.append((hit.label_code, row["id"]))
+            continue
+        matched += 1
+        updates.append((hit.label_code, row["id"]))
 
     if write_outcomes:
-        store_sql.clear_label_audit(trade_date)
+        store_sql.clear_label_audit(trade_date, tracks=tracks)
         store_sql.insert_label_audit(tbm_results, trade_date=trade_date)
         if compare_legacy:
             store_sql.insert_label_audit(legacy_results, trade_date=trade_date)
