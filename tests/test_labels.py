@@ -140,3 +140,22 @@ def test_legacy_vs_tbm_floor_binding() -> None:
     assert sum(1 for r in tbm if r.label == "flat") <= sum(
         1 for r in legacy if r.label == "flat"
     )
+
+
+def test_close_series_cache_hit_absent_and_retain() -> None:
+    from nse_pipeline.labels.batch import CloseSeriesCache
+
+    cache = CloseSeriesCache()
+    idx = pd.date_range("2026-08-13 09:15", periods=3, freq="5min", tz="UTC")
+    series = pd.Series([1.0, 2.0, 3.0], index=idx)
+    cache.put("2026-08-13", "AAA", series)
+    hit, got = cache.try_get("2026-08-13", "AAA")
+    assert hit and list(got) == [1.0, 2.0, 3.0]
+    cache.put("2026-08-12", "AAA", None)
+    hit, got = cache.try_get("2026-08-12", "AAA")
+    assert hit and got is None
+    miss, _ = cache.try_get("2026-08-14", "AAA")
+    assert not miss
+    cache.retain_dates({"2026-08-13"})
+    assert cache.try_get("2026-08-13", "AAA")[0]
+    assert not cache.try_get("2026-08-12", "AAA")[0]

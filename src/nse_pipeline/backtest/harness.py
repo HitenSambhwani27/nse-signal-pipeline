@@ -20,6 +20,7 @@ import pandas as pd
 from nse_pipeline.backtest.costs import cost_breakdown, round_trip_cost_pct
 from nse_pipeline.backtest.metrics import summarize_trades
 from nse_pipeline.config import Settings
+from nse_pipeline.scoring.baseline import thin_features_for_scoring
 from nse_pipeline.session_coverage import scoring_skip_trade_dates
 from nse_pipeline.storage.sqlite_store import SQLiteStore
 
@@ -124,6 +125,8 @@ def run_walk_forward(
     to flag IS/OOS hit-rate divergence.
     """
     store = SQLiteStore(settings.paths.sqlite_db)
+    skipped_dates: set[str] = set()
+    trades_by_date: dict[str, pd.DataFrame] = {}
     if rows is None:
         dates = store.list_feature_trade_dates()
         if start_date:
@@ -132,20 +135,31 @@ def run_walk_forward(
             dates = [d for d in dates if d <= end_date]
         if not dates:
             raise FileNotFoundError("No feature_log dates in the requested window.")
-        rows = store.fetch_feature_logs_range(dates[0], dates[-1])
-    if tracks:
-        wanted = set(tracks)
-        rows = [r for r in rows if str(r.get("track")) in wanted]
-    skipped_dates = scoring_skip_trade_dates(rows)
-    if skipped_dates:
-        rows = [r for r in rows if str(r.get("trade_date")) not in skipped_dates]
-    dates = sorted({str(r.get("trade_date")) for r in rows if r.get("trade_date")})
-
-    by_date: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        d = str(row.get("trade_date") or "")
-        if d:
-            by_date.setdefault(d, []).append(row)
+        for d in dates:
+            day_rows = store.fetch_feature_logs(d, tracks=tracks)
+            if not day_rows:
+                continue
+            if d in scoring_skip_trade_dates(day_rows):
+                skipped_dates.add(d)
+                continue
+            for row in day_rows:
+                row["features"] = thin_features_for_scoring(row.get("features") or {})
+            trades_by_date[d] = _trades_for_rows(day_rows, scorer, settings)
+    else:
+        if tracks:
+            wanted = set(tracks)
+            rows = [r for r in rows if str(r.get("track")) in wanted]
+        skipped_dates = scoring_skip_trade_dates(rows)
+        if skipped_dates:
+            rows = [r for r in rows if str(r.get("trade_date")) not in skipped_dates]
+        by_date: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            d = str(row.get("trade_date") or "")
+            if d:
+                by_date.setdefault(d, []).append(row)
+        for d, day_rows in by_date.items():
+            trades_by_date[d] = _trades_for_rows(day_rows, scorer, settings)
+    dates = sorted(trades_by_date)
 
     windows = iter_walk_forward_windows(
         dates,
@@ -159,11 +173,17 @@ def run_walk_forward(
     all_is: list[pd.DataFrame] = []
     all_oos: list[pd.DataFrame] = []
 
+    def _concat_dates(day_list: list[str]) -> pd.DataFrame:
+        parts = [
+            trades_by_date[d]
+            for d in day_list
+            if d in trades_by_date and not trades_by_date[d].empty
+        ]
+        return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
     for train_dates, test_dates in windows:
-        train_rows = [r for d in train_dates for r in by_date.get(d, [])]
-        test_rows = [r for d in test_dates for r in by_date.get(d, [])]
-        is_trades = _trades_for_rows(train_rows, scorer, settings)
-        oos_trades = _trades_for_rows(test_rows, scorer, settings)
+        is_trades = _concat_dates(train_dates)
+        oos_trades = _concat_dates(test_dates)
         is_m = summarize_trades(is_trades, annualization_days=annual)
         oos_m = summarize_trades(oos_trades, annualization_days=annual)
         gap = None

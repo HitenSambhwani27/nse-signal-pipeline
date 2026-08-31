@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS label_audit (
 );
 
 CREATE INDEX IF NOT EXISTS idx_label_audit_trade_date ON label_audit(trade_date);
+CREATE INDEX IF NOT EXISTS idx_label_audit_trade_date_track ON label_audit(trade_date, track);
 CREATE INDEX IF NOT EXISTS idx_label_audit_mode ON label_audit(mode);
 
 CREATE TABLE IF NOT EXISTS retrain_log (
@@ -376,39 +377,54 @@ class SQLiteStore:
             )
         return len(payload)
 
-    def fetch_feature_logs(self, trade_date: str) -> list[dict[str, Any]]:
+    def fetch_feature_logs(
+        self,
+        trade_date: str,
+        *,
+        tracks: tuple[str, ...] | None = None,
+        include_features: bool = True,
+    ) -> list[dict[str, Any]]:
+        columns = "id, timestamp, trade_date, symbol, track"
+        if include_features:
+            columns += ", features_json, actual_outcome, source, feature_completeness"
+        sql = f"SELECT {columns} FROM feature_log WHERE trade_date = ?"
+        params: list[Any] = [trade_date]
+        if tracks:
+            placeholders = ",".join("?" * len(tracks))
+            sql += f" AND track IN ({placeholders})"
+            params.extend(tracks)
+        sql += " ORDER BY symbol, timestamp"
         with self.connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, timestamp, trade_date, symbol, track, features_json,
-                       actual_outcome, source, feature_completeness
-                FROM feature_log
-                WHERE trade_date = ?
-                ORDER BY symbol, timestamp
-                """,
-                (trade_date,),
-            ).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         out: list[dict[str, Any]] = []
         for row in rows:
             item = dict(row)
-            item["features"] = json.loads(item.pop("features_json"))
+            if include_features:
+                item["features"] = json.loads(item.pop("features_json"))
             out.append(item)
         return out
 
     def fetch_feature_logs_range(
-        self, start_date: str, end_date: str
+        self,
+        start_date: str,
+        end_date: str,
+        *,
+        tracks: tuple[str, ...] | None = None,
     ) -> list[dict[str, Any]]:
+        sql = """
+            SELECT id, timestamp, trade_date, symbol, track, features_json,
+                   actual_outcome, source, feature_completeness
+            FROM feature_log
+            WHERE trade_date >= ? AND trade_date <= ?
+        """
+        params: list[Any] = [start_date, end_date]
+        if tracks:
+            placeholders = ",".join("?" * len(tracks))
+            sql += f" AND track IN ({placeholders})"
+            params.extend(tracks)
+        sql += " ORDER BY trade_date, symbol, timestamp"
         with self.connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, timestamp, trade_date, symbol, track, features_json,
-                       actual_outcome, source, feature_completeness
-                FROM feature_log
-                WHERE trade_date >= ? AND trade_date <= ?
-                ORDER BY trade_date, symbol, timestamp
-                """,
-                (start_date, end_date),
-            ).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         out: list[dict[str, Any]] = []
         for row in rows:
             item = dict(row)

@@ -77,6 +77,9 @@ class DuckDBTickStore:
             if p.is_dir() and (p / "ticks.parquet").exists()
         )
 
+    def has_ticks(self, date_str: str, symbol: str) -> bool:
+        return self._ticks_path(date_str, symbol).is_file()
+
     def query(self, sql: str, params: list[Any] | None = None) -> pd.DataFrame:
         """Run arbitrary SQL (advanced). Prefer typed helpers below for Stage 2."""
         if params:

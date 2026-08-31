@@ -23,6 +23,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from nse_pipeline.config import load_settings  # noqa: E402
 from nse_pipeline.labels.batch import (  # noqa: E402
+    CloseSeriesCache,
     format_binding_table,
     format_hourly_table,
     run_labeling,
@@ -93,6 +94,7 @@ def main() -> int:
         return 1
 
     exit_code = 0
+    closes_cache = CloseSeriesCache()
     for date_str in dates:
         try:
             report = run_labeling(
@@ -101,6 +103,7 @@ def main() -> int:
                 write_outcomes=not args.no_write,
                 compare_legacy=compare,
                 tracks=tracks,
+                closes_cache=closes_cache,
             )
         except Exception as exc:
             print(f"[{date_str}] Labeling failed: {exc}")

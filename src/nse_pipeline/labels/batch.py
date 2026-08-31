@@ -30,12 +30,78 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+class CloseSeriesCache:
+    """Reuse 5-minute close series across consecutive label dates.
+
+    Each date warms vol from the prior 10 sessions. Re-reading those parquet
+    files every day is fine while they stay in the OS cache, but a large
+    sqlite working set evicts them and wall time jumps by an order of magnitude.
+    """
+
+    def __init__(self) -> None:
+        self._closes: dict[tuple[str, str], pd.Series] = {}
+        self._absent: set[tuple[str, str]] = set()
+
+    def try_get(self, date_str: str, symbol: str) -> tuple[bool, pd.Series | None]:
+        key = (date_str, symbol)
+        if key in self._absent:
+            return True, None
+        series = self._closes.get(key)
+        if series is not None:
+            return True, series
+        return False, None
+
+    def put(self, date_str: str, symbol: str, closes: pd.Series | None) -> None:
+        key = (date_str, symbol)
+        if closes is None or closes.empty:
+            self._absent.add(key)
+            self._closes.pop(key, None)
+            return
+        self._closes[key] = closes
+        self._absent.discard(key)
+
+    def retain_dates(self, keep: set[str]) -> None:
+        self._closes = {k: v for k, v in self._closes.items() if k[0] in keep}
+        self._absent = {k for k in self._absent if k[0] in keep}
+
+
 def _prior_trade_dates(
     store: DuckDBTickStore, trade_date: str, *, n_days: int
 ) -> list[str]:
     """Compacted dates strictly before trade_date, oldest first, last n_days."""
     prior = [d for d in store.list_compacted_dates() if d < trade_date]
     return prior[-n_days:]
+
+
+def _load_closes(
+    store: DuckDBTickStore,
+    date_str: str,
+    symbol: str,
+    bucket_minutes: int,
+    cache: CloseSeriesCache | None,
+) -> pd.Series | None:
+    if cache is not None:
+        hit, series = cache.try_get(date_str, symbol)
+        if hit:
+            return series
+    if not store.has_ticks(date_str, symbol):
+        if cache is not None:
+            cache.put(date_str, symbol, None)
+        return None
+    try:
+        ticks = store.read_ticks(date_str, symbol)
+    except FileNotFoundError:
+        if cache is not None:
+            cache.put(date_str, symbol, None)
+        return None
+    closes = build_five_min_closes(ticks, bucket_minutes)
+    if closes.empty:
+        if cache is not None:
+            cache.put(date_str, symbol, None)
+        return None
+    if cache is not None:
+        cache.put(date_str, symbol, closes)
+    return closes
 
 
 def _track_for_symbol(cache: dict[str, Any], symbol: str) -> str:
@@ -61,6 +127,7 @@ def run_labeling(
     write_outcomes: bool = True,
     compare_legacy: bool = True,
     tracks: tuple[str, ...] | None = None,
+    closes_cache: CloseSeriesCache | None = None,
 ) -> dict[str, Any]:
     """
     Label feature_log rows for trade_date using compacted tick closes.
@@ -74,10 +141,9 @@ def run_labeling(
     horizon_minutes = settings.signal.candle_interval_minutes
     horizon_bars = max(1, horizon_minutes // settings.features.oi_bucket_minutes)
 
-    feature_rows = store_sql.fetch_feature_logs(trade_date)
-    if tracks:
-        wanted = set(tracks)
-        feature_rows = [r for r in feature_rows if str(r.get("track")) in wanted]
+    feature_rows = store_sql.fetch_feature_logs(
+        trade_date, tracks=tracks, include_features=False
+    )
     if not feature_rows:
         return {
             "trade_date": trade_date,
@@ -103,30 +169,28 @@ def run_labeling(
             store=store,
             symbols=sorted({r["symbol"] for r in feature_rows}),
         )
-        available = set(store.list_tick_symbols(trade_date))
         warmup_dates = _prior_trade_dates(store, trade_date, n_days=10)
+        if closes_cache is not None:
+            closes_cache.retain_dates(set(warmup_dates) | {trade_date})
+        bucket_minutes = settings.features.oi_bucket_minutes
         for symbol in symbols:
-            if symbol not in available:
-                logger.warning(
-                    "No compacted ticks for %s on %s — skip labels", symbol, trade_date
-                )
-                continue
-            ticks = store.read_ticks(trade_date, symbol)
-            closes = build_five_min_closes(ticks, settings.features.oi_bucket_minutes)
-            if len(closes) < 2:
+            closes = _load_closes(
+                store, trade_date, symbol, bucket_minutes, closes_cache
+            )
+            if closes is None or len(closes) < 2:
+                if closes is None:
+                    logger.warning(
+                        "No compacted ticks for %s on %s — skip labels",
+                        symbol,
+                        trade_date,
+                    )
                 continue
             prior_series: list[pd.Series] = []
             for prior in warmup_dates:
-                if symbol not in set(store.list_tick_symbols(prior)):
-                    continue
-                try:
-                    prior_closes = build_five_min_closes(
-                        store.read_ticks(prior, symbol),
-                        settings.features.oi_bucket_minutes,
-                    )
-                except FileNotFoundError:
-                    continue
-                if not prior_closes.empty:
+                prior_closes = _load_closes(
+                    store, prior, symbol, bucket_minutes, closes_cache
+                )
+                if prior_closes is not None and not prior_closes.empty:
                     prior_series.append(prior_closes)
             if prior_series:
                 warmed = pd.concat(prior_series + [closes])

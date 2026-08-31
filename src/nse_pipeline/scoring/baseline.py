@@ -114,6 +114,27 @@ def score_feature_row(
     }
 
 
+def thin_features_for_scoring(features: dict[str, Any]) -> dict[str, Any]:
+    """Keep only keys the YAML scorer and cost model read."""
+    keep_names = {
+        "ltp",
+        "depth_ratio_bid_ask",
+        "spread_bps",
+        "ofi_bucket_sum",
+        "vwap_deviation_bps",
+        "pcr",
+        "oi_buildup_state",
+        "delta",
+        "gamma",
+        "basis_bps",
+        "calendar_spread_near_minus_next",
+        "greeks",
+        "depth_features_skipped",
+        "source",
+    }
+    return {k: features[k] for k in keep_names if k in features}
+
+
 def run_baseline_scorer(
     settings: Settings,
     start_date: str,
@@ -125,30 +146,34 @@ def run_baseline_scorer(
     """Idempotent per date/track: deletes existing baseline signal_log rows, then writes."""
     store = SQLiteStore(settings.paths.sqlite_db)
     weights = load_baseline_weights(weights_path)
-    rows = store.fetch_feature_logs_range(start_date, end_date)
-    if tracks:
-        wanted = set(tracks)
-        rows = [r for r in rows if str(r.get("track")) in wanted]
-    skipped_dates = scoring_skip_trade_dates(rows)
-    if skipped_dates:
-        rows = [r for r in rows if str(r.get("trade_date")) not in skipped_dates]
-        for d in sorted(skipped_dates):
-            store.delete_signal_logs_for_trade_date(str(d), tracks=tracks)
-    dates = sorted({r.get("trade_date") for r in rows if r.get("trade_date")})
-    for d in dates:
-        store.delete_signal_logs_for_trade_date(str(d), tracks=tracks)
-
-    payload = [score_feature_row(r, weights) for r in rows]
-    inserted = store.insert_signal_logs(payload)
+    dates = [
+        d
+        for d in store.list_feature_trade_dates()
+        if start_date <= d <= end_date
+    ]
+    skipped_dates: set[str] = set()
     by_track: dict[str, int] = {}
     by_source: dict[str, int] = {}
     by_completeness: dict[str, int] = {}
-    for row, scored in zip(rows, payload):
-        by_track[scored["track"]] = by_track.get(scored["track"], 0) + 1
-        src = str(scored.get("source") or "unknown")
-        by_source[src] = by_source.get(src, 0) + 1
-        comp = str((row.get("feature_completeness") or "unknown"))
-        by_completeness[comp] = by_completeness.get(comp, 0) + 1
+    inserted = 0
+    for trade_date in dates:
+        rows = store.fetch_feature_logs(trade_date, tracks=tracks)
+        if not rows:
+            continue
+        date_skip = scoring_skip_trade_dates(rows)
+        if trade_date in date_skip:
+            skipped_dates.add(trade_date)
+            store.delete_signal_logs_for_trade_date(trade_date, tracks=tracks)
+            continue
+        store.delete_signal_logs_for_trade_date(trade_date, tracks=tracks)
+        payload = [score_feature_row(r, weights) for r in rows]
+        inserted += store.insert_signal_logs(payload)
+        for row, scored in zip(rows, payload):
+            by_track[scored["track"]] = by_track.get(scored["track"], 0) + 1
+            src = str(scored.get("source") or "unknown")
+            by_source[src] = by_source.get(src, 0) + 1
+            comp = str(row.get("feature_completeness") or "unknown")
+            by_completeness[comp] = by_completeness.get(comp, 0) + 1
     return {
         "start_date": start_date,
         "end_date": end_date,
