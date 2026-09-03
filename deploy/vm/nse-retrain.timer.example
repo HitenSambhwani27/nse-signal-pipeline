@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly NSE retrain timer (Sunday 16:30 IST = 11:00 UTC)
+# Example only — do not enable until asked. auto_promote stays false.
+
+[Timer]
+OnCalendar=Sun *-*-* 11:00:00 UTC
+Persistent=true
+Unit=nse-retrain.service
+
+[Install]
+WantedBy=timers.target

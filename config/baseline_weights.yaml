@@ -1,10 +1,18 @@
 # Phase 1 hand-specified linear scoring weights (placeholder).
 # Replace these with your designed formulas before running baseline scorer.
+#
+# equity_depth and equity_quote MUST stay separate. Quote-tier names have no
+# L2 book (Part 2); they must not inherit depth_ratio / spread_bps / ofi.
 
-equity:
+equity_depth:
   depth_ratio: 0.25
   spread_bps: -0.15
   ofi: 0.35
+  vwap_deviation: 0.25
+  intercept: 0.0
+
+# Depth-free. Do not add depth_ratio / spread_bps / ofi here.
+equity_quote:
   vwap_deviation: 0.25
   intercept: 0.0
 

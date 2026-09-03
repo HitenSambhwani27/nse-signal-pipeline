@@ -14,12 +14,38 @@ from nse_pipeline.storage.sqlite_store import SQLiteStore
 
 OI_LONG = {"long_buildup", "short_covering"}
 OI_SHORT = {"short_buildup", "long_unwinding"}
+# Never applied to equity_quote, even if copied into that YAML block by mistake.
+DEPTH_WEIGHT_KEYS = frozenset({"depth_ratio", "spread_bps", "ofi"})
 
 
 def load_baseline_weights(path: Path | None = None) -> dict[str, Any]:
     weights_path = path or (PROJECT_ROOT / "config" / "baseline_weights.yaml")
     with weights_path.open("r", encoding="utf-8") as handle:
-        return yaml.safe_load(handle)
+        cfg = yaml.safe_load(handle) or {}
+    # Legacy YAML used a single "equity" block for Nifty 100 depth.
+    if "equity_depth" not in cfg and "equity" in cfg:
+        cfg["equity_depth"] = dict(cfg["equity"])
+    return cfg
+
+
+def _weight_bucket(track: str, weights_cfg: dict[str, Any]) -> str:
+    """Map a feature track to a YAML weight block. Quote never shares depth weights."""
+    if track == "equity_quote":
+        if "equity_quote" not in weights_cfg:
+            raise KeyError(
+                "equity_quote rows require a dedicated equity_quote weight set; "
+                "refusing to score them with equity/equity_depth (depth) weights"
+            )
+        return "equity_quote"
+    if track == "equity_depth":
+        if "equity_depth" in weights_cfg:
+            return "equity_depth"
+        if "equity" in weights_cfg:
+            return "equity"
+        raise KeyError("No equity_depth (or legacy equity) weights in baseline YAML")
+    if track in weights_cfg:
+        return track
+    raise KeyError(f"No baseline weights for track={track!r}")
 
 
 def _sigmoid(x: float) -> float:
@@ -63,22 +89,23 @@ def score_feature_row(
     row: dict[str, Any], weights_cfg: dict[str, Any]
 ) -> dict[str, Any]:
     """
-    Linear score using YAML weights. Missing depth features are skipped
-    (contribution 0) so historical_partial and live_quote rows still score.
+    Linear score using YAML weights for this row's track.
+
+    equity_quote uses a depth-free weight set. Depth terms are stripped, not
+    zero-filled: a missing or 0.0 book feature must not enter the quote score.
+    equity_depth may still skip missing L2 terms on historical_partial rows.
     """
     track = str(row.get("track") or "")
-    if track.startswith("equity"):
-        bucket = "equity"
-    elif track == "options":
-        bucket = "options"
-    elif track == "futures":
-        bucket = "futures"
-    else:
-        bucket = "equity"
-
+    bucket = _weight_bucket(track, weights_cfg)
     weights: dict[str, float] = dict(weights_cfg.get(bucket) or {})
+    if track == "equity_quote":
+        for key in DEPTH_WEIGHT_KEYS:
+            weights.pop(key, None)
     intercept = float(weights.pop("intercept", 0.0))
     flat = _flatten_features(row.get("features") or {})
+    if track == "equity_quote":
+        for key in DEPTH_WEIGHT_KEYS:
+            flat.pop(key, None)
 
     score = intercept
     used: dict[str, float] = {}
@@ -98,7 +125,7 @@ def score_feature_row(
         "trade_date": row.get("trade_date"),
         "symbol": row["symbol"],
         "track": track,
-        "model_version": "baseline_yaml_v1",
+        "model_version": "baseline_yaml_v2",
         "score": score,
         "probability": probability,
         "features": row.get("features") or {},
@@ -109,6 +136,7 @@ def score_feature_row(
             "intercept": intercept,
             "score": score,
             "probability": probability,
+            "weight_bucket": bucket,
         },
         "maturity_tier": None,
     }

@@ -83,22 +83,20 @@ live days accumulate.
 
 ---
 
-## Stages 7–9 (this build)
+## Stages 7–9 (built, not live-trading)
 
-Account/order capture, decision-fill-outcome linkage, and decision-quality
-scoring are **out of scope**. No real trading is happening. Stage 4 backtest
-validates the model only — it must not emit trade records shaped for
-Stages 7–9.
+Account capture, decision/fill/outcome linkage, and decision-quality scoring
+are implemented. They do **not** place orders. The live signal engine still
+refuses a public probability until 60 pooled live days. Stage 4 backtest
+must not mint `decision_log` rows.
 
 ---
 
-## Scheduling: local now, cloud later
+## Scheduling: VM ingest + after-close jobs
 
-**Now:** Windows Task Scheduler on the local PC for the after-close
-sequence (auth → compaction → features → labels). See README.
-
-**Later (not built now):** migrate the same scripts to a Mumbai-region VM
-and cron, once the local pipeline is trusted. Do not dual-run.
+Live ingest runs on the Bangalore droplet. Do **not** dual-run the PC and the
+VM on the same session. Cron snippets for the VM (not installed by this
+change — copy when you are ready) live in README.
 
 ---
 

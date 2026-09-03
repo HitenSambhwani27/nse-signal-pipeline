@@ -31,6 +31,7 @@ from nse_pipeline.features.quality import (
     filter_bad_ticks,
     session_open_price,
 )
+from nse_pipeline.features.tick_stats import add_session_vwap, depth_features_by_bucket
 from nse_pipeline.session_coverage import (
     assess_session_coverage,
     format_coverage_banner,
@@ -435,6 +436,7 @@ def run_feature_batch(
             )
             quality_buffer.extend(q_events)
             ingest_halt_buffer.extend(h_events)
+            clean = add_session_vwap(clean, source=source)
             option_buckets[symbol] = bucket_option_series(
                 clean, bucket_minutes=bucket_minutes
             )
@@ -475,6 +477,7 @@ def run_feature_batch(
 
         fut_buckets: dict[str, pd.DataFrame] = {}
         fut_source: dict[str, str] = {}
+        fut_depth: dict[str, dict[pd.Timestamp, dict[str, Any]]] = {}
         for symbol in fut_symbols:
             ticks = store.read_ticks(date_str, symbol)
             source = _infer_source(ticks)
@@ -490,9 +493,17 @@ def run_feature_batch(
             )
             quality_buffer.extend(q_events)
             ingest_halt_buffer.extend(h_events)
+            clean = add_session_vwap(clean, source=source)
             fut_buckets[symbol] = bucket_futures_series(
                 clean, bucket_minutes=bucket_minutes
             )
+            # Historical OHLCV has no L2 book (TRADE_OFFS). Live full-mode ticks do.
+            if source != "historical":
+                fut_depth[symbol] = depth_features_by_bucket(
+                    clean, bucket_minutes=bucket_minutes
+                )
+            else:
+                fut_depth[symbol] = {}
 
         for underlying, syms in by_underlying.items():
             ordered = sorted(syms, key=lambda s: str(meta[s].get("expiry") or ""))
@@ -530,6 +541,7 @@ def run_feature_batch(
                     is_near=(symbol == near_sym),
                     bucket_minutes=bucket_minutes,
                     basis_days_per_year=settings.features.basis_days_per_year,
+                    depth_by_bucket=fut_depth.get(symbol),
                 )
                 _stamp_source(fut_rows, fut_source.get(symbol, "live"))
                 feature_rows.extend(fut_rows)

@@ -1,0 +1,19 @@
+[Unit]
+Description=NSE pipeline read-only UI API (localhost only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nse
+Group=nse
+WorkingDirectory=/home/nse/nse-signal-pipeline
+Environment=PYTHONPATH=src
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/nse/nse-signal-pipeline/.env
+ExecStart=/home/nse/nse-signal-pipeline/.venv/bin/python scripts/14_run_ui_api.py --host 127.0.0.1 --port 8080
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

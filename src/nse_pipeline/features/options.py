@@ -1,7 +1,7 @@
 """
 Stage 2B — index options features (Nifty + Bank Nifty only).
 
-OI buildup (4-state), PCR with buildup context, Greeks stub via greeks.py.
+OI buildup (4-state), PCR with buildup context, Black-Scholes Greeks via greeks.py.
 Expiry / lot size must come from the instrument cache (live master), never hardcoded.
 """
 
@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from nse_pipeline.features.greeks import compute_greeks
+from nse_pipeline.features.tick_stats import lookup_by_bucket
 
 
 def classify_oi_buildup(price_change: float, oi_change: float) -> str:
@@ -67,16 +68,15 @@ def bucket_option_series(
     df = ticks.sort_values("timestamp").copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     df["bucket"] = df["timestamp"].map(lambda t: _bucket_end(t, bucket_minutes))
-    out = (
-        df.groupby("bucket", sort=True)
-        .agg(
-            ltp=("last_price", "last"),
-            oi=("oi", "last"),
-            volume=("volume", "last"),
-            tick_count=("last_price", "size"),
-        )
-        .reset_index()
-    )
+    agg: dict[str, tuple[str, str]] = {
+        "ltp": ("last_price", "last"),
+        "oi": ("oi", "last"),
+        "volume": ("volume", "last"),
+        "tick_count": ("last_price", "size"),
+    }
+    if "vwap" in df.columns:
+        agg["vwap"] = ("vwap", "last")
+    out = df.groupby("bucket", sort=True).agg(**agg).reset_index()
     return out
 
 
@@ -93,7 +93,7 @@ def compute_option_features_for_symbol(
     pcr_by_bucket: dict[pd.Timestamp, dict[str, Any]],
     bucket_minutes: int,
 ) -> list[dict[str, Any]]:
-    """Attach buildup, PCR context, and Greeks stub rows for one option contract."""
+    """Attach buildup, PCR context, VWAP, DTE, and Black-Scholes Greeks."""
     if buckets.empty:
         return []
 
@@ -113,15 +113,25 @@ def compute_option_features_for_symbol(
         oi_change = (oi - prev_oi) if prev_oi is not None and oi is not None else 0.0
         buildup = classify_oi_buildup(price_change, oi_change)
 
-        spot = spot_by_bucket.get(bucket_ts)
+        spot = lookup_by_bucket(spot_by_bucket, bucket_ts)
+        if spot is not None:
+            spot = float(spot)
+        days_to_expiry = None
         tte_years = None
         if expiry_date is not None:
-            days = max((expiry_date - bucket_ts.date()).days, 0)
-            tte_years = days / 365.0
+            days_to_expiry = (expiry_date - bucket_ts.date()).days
+            if days_to_expiry >= 0:
+                tte_years = max(days_to_expiry, 1) / 365.0
+            days_to_expiry = max(days_to_expiry, 0)
+
+        vwap = float(row["vwap"]) if "vwap" in row.index and pd.notna(row["vwap"]) else None
+        vwap_dev_bps = (
+            ((ltp / vwap - 1.0) * 10000.0) if vwap and vwap > 0 else None
+        )
 
         greeks = None
         if spot is not None and strike is not None and tte_years is not None:
-            # IV stub 0.15 — real IV solver lands with Stage hedge/IV work.
+            # IV assumed 0.15 until a market-IV solver exists; BS greeks still populate.
             greeks = compute_greeks(
                 spot=spot,
                 strike=float(strike),
@@ -130,16 +140,20 @@ def compute_option_features_for_symbol(
                 option_type=option_type,
             )
 
-        pcr_ctx = pcr_by_bucket.get(bucket_ts, {})
+        pcr_ctx = lookup_by_bucket(pcr_by_bucket, bucket_ts) or {}
+        greeks_dict = greeks if isinstance(greeks, dict) else {}
         features: dict[str, Any] = {
             "underlying": underlying,
             "option_type": option_type,
             "strike": strike,
             "expiry": expiry,
+            "days_to_expiry": days_to_expiry,
             "lot_size": lot_size,
             "ltp": ltp,
             "oi": oi,
             "volume": int(row["volume"]) if pd.notna(row["volume"]) else None,
+            "vwap": vwap,
+            "vwap_deviation_bps": vwap_dev_bps,
             "price_change": price_change,
             "oi_change": oi_change,
             "oi_buildup_state": buildup,
@@ -148,6 +162,8 @@ def compute_option_features_for_symbol(
             "pcr_call_oi": pcr_ctx.get("call_oi"),
             "pcr_buildup_context": pcr_ctx.get("buildup_context"),
             "spot": spot,
+            "delta": greeks_dict.get("delta"),
+            "gamma": greeks_dict.get("gamma"),
             "greeks": greeks,
             "bucket_minutes": bucket_minutes,
             "tick_count": int(row["tick_count"]),

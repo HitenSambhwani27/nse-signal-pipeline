@@ -1,0 +1,19 @@
+[Unit]
+Description=NSE Kite account/order REST capture (does not place orders)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nse
+Group=nse
+WorkingDirectory=/home/nse/nse-signal-pipeline
+Environment=PYTHONPATH=src
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/nse/nse-signal-pipeline/.env
+ExecStart=/home/nse/nse-signal-pipeline/.venv/bin/python scripts/12_run_account_capture.py --poll-seconds 30
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

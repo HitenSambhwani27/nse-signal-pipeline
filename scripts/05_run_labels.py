@@ -26,8 +26,8 @@ from nse_pipeline.labels.batch import (  # noqa: E402
     CloseSeriesCache,
     format_binding_table,
     format_hourly_table,
-    run_labeling,
 )
+from nse_pipeline.processing.jobs import ExistingLabelProcessor  # noqa: E402
 
 
 def main() -> int:
@@ -95,9 +95,10 @@ def main() -> int:
 
     exit_code = 0
     closes_cache = CloseSeriesCache()
+    processor = ExistingLabelProcessor()
     for date_str in dates:
         try:
-            report = run_labeling(
+            report = processor.process_date(
                 settings,
                 date_str,
                 write_outcomes=not args.no_write,

@@ -23,12 +23,7 @@ def _window(settings: Settings, as_of: date | None = None) -> tuple[str, str]:
 
 def source_composition(settings: Settings, start: str, end: str) -> dict[str, int]:
     store = SQLiteStore(settings.paths.sqlite_db)
-    rows = store.fetch_feature_logs_range(start, end)
-    out: dict[str, int] = {}
-    for row in rows:
-        key = str(row.get("source") or "unknown")
-        out[key] = out.get(key, 0) + 1
-    return out
+    return store.count_feature_logs_by_source(start, end)
 
 
 def _oos_hit(pair: dict[str, Any] | None) -> float | None:
@@ -84,6 +79,16 @@ def run_retrain(
             "new_oos": (coarse.get("harness") or {}).get("oos"),
             "new_path": coarse.get("path"),
             "current_loaded": current.get(class_key) is not None,
+        }
+
+    quality_counts = store.outcome_class_counts()
+    if quality_counts:
+        comparison["decision_quality"] = {
+            "class_counts": quality_counts,
+            "note": (
+                "Use 2x2 classification, not raw P&L. "
+                "Do not reward lucky bad decisions or punish unlucky good ones."
+            ),
         }
 
     promoted = False

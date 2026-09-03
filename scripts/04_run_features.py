@@ -20,7 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from nse_pipeline.config import load_settings  # noqa: E402
-from nse_pipeline.features.batch import run_feature_batch  # noqa: E402
+from nse_pipeline.processing.jobs import ExistingFeatureProcessor  # noqa: E402
 
 
 def _auto_workers() -> int:
@@ -81,10 +81,11 @@ def main() -> int:
         return 1
     print(f"equity_symbol_workers={workers}")
     executor = ProcessPoolExecutor(max_workers=workers) if workers > 1 else None
+    processor = ExistingFeatureProcessor()
     try:
         for date_str in dates:
             try:
-                summary = run_feature_batch(
+                summary = processor.process_date(
                     settings,
                     date_str,
                     tracks=tracks,

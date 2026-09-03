@@ -11,6 +11,8 @@ from typing import Any
 
 import pandas as pd
 
+from nse_pipeline.features.tick_stats import lookup_by_bucket
+
 
 def _bucket_end(ts: pd.Timestamp, minutes: int) -> pd.Timestamp:
     floored = ts.floor(f"{minutes}min")
@@ -38,16 +40,15 @@ def bucket_futures_series(ticks: pd.DataFrame, *, bucket_minutes: int) -> pd.Dat
     df = ticks.sort_values("timestamp").copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     df["bucket"] = df["timestamp"].map(lambda t: _bucket_end(t, bucket_minutes))
-    return (
-        df.groupby("bucket", sort=True)
-        .agg(
-            ltp=("last_price", "last"),
-            oi=("oi", "last"),
-            volume=("volume", "last"),
-            tick_count=("last_price", "size"),
-        )
-        .reset_index()
-    )
+    agg: dict[str, tuple[str, str]] = {
+        "ltp": ("last_price", "last"),
+        "oi": ("oi", "last"),
+        "volume": ("volume", "last"),
+        "tick_count": ("last_price", "size"),
+    }
+    if "vwap" in df.columns:
+        agg["vwap"] = ("vwap", "last")
+    return df.groupby("bucket", sort=True).agg(**agg).reset_index()
 
 
 def compute_futures_features(
@@ -63,6 +64,7 @@ def compute_futures_features(
     is_near: bool,
     bucket_minutes: int,
     basis_days_per_year: int,
+    depth_by_bucket: dict[pd.Timestamp, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Futures vs spot basis + near/next calendar spread context."""
     if buckets.empty:
@@ -76,7 +78,9 @@ def compute_futures_features(
         fut = float(row["ltp"]) if pd.notna(row["ltp"]) else None
         if fut is None:
             continue
-        spot = spot_by_bucket.get(bucket_ts)
+        spot = lookup_by_bucket(spot_by_bucket, bucket_ts)
+        if spot is not None:
+            spot = float(spot)
         basis_abs = (fut - spot) if spot is not None else None
         basis_bps = ((fut / spot - 1.0) * 10000.0) if spot not in (None, 0) else None
 
@@ -87,11 +91,17 @@ def compute_futures_features(
             if basis_bps is not None and days_to_expiry > 0:
                 basis_annualized = basis_bps * (basis_days_per_year / days_to_expiry)
 
-        near_ltp = near_ltp_by_bucket.get(bucket_ts) if near_ltp_by_bucket else None
-        next_ltp = next_ltp_by_bucket.get(bucket_ts) if next_ltp_by_bucket else None
+        near_ltp = lookup_by_bucket(near_ltp_by_bucket, bucket_ts)
+        next_ltp = lookup_by_bucket(next_ltp_by_bucket, bucket_ts)
         calendar_spread = None
         if near_ltp is not None and next_ltp is not None:
             calendar_spread = near_ltp - next_ltp
+
+        vwap = float(row["vwap"]) if "vwap" in row.index and pd.notna(row["vwap"]) else None
+        vwap_dev_bps = (
+            ((fut / vwap - 1.0) * 10000.0) if vwap and vwap > 0 else None
+        )
+        depth = lookup_by_bucket(depth_by_bucket, bucket_ts) or {}
 
         features: dict[str, Any] = {
             "underlying": underlying,
@@ -101,6 +111,8 @@ def compute_futures_features(
             "ltp": fut,
             "oi": float(row["oi"]) if pd.notna(row["oi"]) else None,
             "volume": int(row["volume"]) if pd.notna(row["volume"]) else None,
+            "vwap": vwap,
+            "vwap_deviation_bps": vwap_dev_bps,
             "spot": spot,
             "basis_abs": basis_abs,
             "basis_bps": basis_bps,
@@ -112,6 +124,17 @@ def compute_futures_features(
             "bucket_minutes": bucket_minutes,
             "tick_count": int(row["tick_count"]),
         }
+        if depth:
+            features.update(
+                {
+                    "best_bid": depth.get("best_bid"),
+                    "best_ask": depth.get("best_ask"),
+                    "spread_abs": depth.get("spread_abs"),
+                    "spread_bps": depth.get("spread_bps"),
+                    "depth_ratio_bid_ask": depth.get("depth_ratio_bid_ask"),
+                    "ofi_bucket_sum": depth.get("ofi_bucket_sum"),
+                }
+            )
         rows.append(
             {
                 "timestamp": bucket_ts.isoformat(),

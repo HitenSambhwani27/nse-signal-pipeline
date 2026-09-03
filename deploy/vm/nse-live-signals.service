@@ -1,0 +1,19 @@
+[Unit]
+Description=NSE live signal engine (watch today's feature_log; does not place orders)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nse
+Group=nse
+WorkingDirectory=/home/nse/nse-signal-pipeline
+Environment=PYTHONPATH=src
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/nse/nse-signal-pipeline/.env
+ExecStart=/home/nse/nse-signal-pipeline/.venv/bin/python scripts/10_run_live_signals.py --watch
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
