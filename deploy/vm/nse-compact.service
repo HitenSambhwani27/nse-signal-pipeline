@@ -1,0 +1,14 @@
+[Unit]
+Description=NSE after-close compaction for today's IST date
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=nse
+Group=nse
+WorkingDirectory=/home/nse/nse-signal-pipeline
+Environment=PYTHONPATH=src
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/nse/nse-signal-pipeline/.env
+ExecStart=/bin/bash /home/nse/nse-signal-pipeline/deploy/vm/run_afterclose_today.sh compact
+Nice=10

@@ -14,6 +14,7 @@ build/
 data/
 logs/
 config/instruments_cache.json
+.pytest_cache/
 
 # IDE
 .vscode/

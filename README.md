@@ -156,7 +156,69 @@ $d = (Get-Date).ToString("yyyy-MM-dd")
 .\.venv\Scripts\python.exe scripts\04_run_features.py --date $d
 ```
 
-Cloud VM (Mumbai) + cron is documented as a later migration in TRADE_OFFS.md — not built now.
+Cloud VM after-close (do not dual-run with the PC). Copy when you install cron;
+this repo does not enable it for you:
+
+```cron
+# IST = UTC+5:30. After cash close ~10:15 UTC.
+15 10 * * 1-5  cd /home/nse/nse-signal-pipeline && .venv/bin/python scripts/03_run_compaction.py --verify
+30 10 * * 1-5  cd /home/nse/nse-signal-pipeline && PYTHONPATH=src .venv/bin/python scripts/04_run_features.py
+45 10 * * 1-5  cd /home/nse/nse-signal-pipeline && PYTHONPATH=src .venv/bin/python scripts/05_run_labels.py
+0 11 * * 0     cd /home/nse/nse-signal-pipeline && PYTHONPATH=src .venv/bin/python scripts/11_run_retrain.py
+```
+
+`retrain.auto_promote` stays false. New model files are versioned; the live
+engine loads only harness-passed pairs. Until 60 pooled live days, the UI API
+(`scripts/14_run_ui_api.py`) returns `insufficient data, N/60 pooled days`
+and null probabilities.
+
+The dashboard is a **separate git repo** (`nse-signal-dashboard`). It talks
+only to the read-only API — never to SQLite or `nse_pipeline`.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for frozen `/api/v1` contracts.
+Research, draft algorithms, and one-off diagnostics are inventoried in
+[research/INVENTORY.md](research/INVENTORY.md) — they are not imported by the
+live systemd units.
+
+### Dashboard: fixtures (PC, no VM DB)
+
+```powershell
+cd C:\Users\sambh\nse-signal-dashboard
+$env:NSE_USE_FIXTURES = "1"
+# or: $env:NSE_API_URL = "mock"
+streamlit run src/nse_dashboard/app.py
+```
+
+Default fixtures are suppressed (`insufficient data, 2/60 pooled days`, null probability).
+
+### Dashboard: live API over SSH tunnel
+
+The API binds `127.0.0.1:8080` on the VM (`python scripts/14_run_ui_api.py`).
+From the PC:
+
+```powershell
+ssh -L 8080:127.0.0.1:8080 nse@<vm-host>
+$env:NSE_API_URL = "http://127.0.0.1:8080"
+cd C:\Users\sambh\nse-signal-dashboard
+streamlit run src/nse_dashboard/app.py
+```
+
+Do not copy production SQLite or VM `.env` to the PC.
+
+### VM systemd (API, live signals, account capture, after-close)
+
+Installable units live in `deploy/vm/`. Runtime: `nse-api`, `nse-live-signals`,
+`nse-account-capture`. After-close timers (weekdays, machine TZ Asia/Kolkata):
+
+| Timer | Local clock | Service |
+|---|---|---|
+| `nse-compact.timer` | Mon–Fri 15:45 | today's compact + coverage |
+| `nse-features.timer` | Mon–Fri 16:00 | today's features |
+| `nse-labels.timer` | Mon–Fri 16:30 | today's labels |
+
+They do **not** start ingest. Weekly retrain timer examples stay uninstalled;
+`auto_promote` remains false.
+
 
 
 

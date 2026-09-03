@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekday NSE labels at 16:30 IST
+
+[Timer]
+OnCalendar=Mon..Fri 16:30:00
+Persistent=true
+Unit=nse-labels.service
+
+[Install]
+WantedBy=timers.target

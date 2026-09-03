@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekday NSE compaction at 15:45 IST
+
+[Timer]
+OnCalendar=Mon..Fri 15:45:00
+Persistent=true
+Unit=nse-compact.service
+
+[Install]
+WantedBy=timers.target

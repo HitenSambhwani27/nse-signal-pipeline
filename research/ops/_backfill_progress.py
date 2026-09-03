@@ -1,3 +1,8 @@
+from pathlib import Path
+import sys
+_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_ROOT / 'src'))
+
 import json
 import sqlite3
 from nse_pipeline.config import load_settings
