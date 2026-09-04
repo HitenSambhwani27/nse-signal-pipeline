@@ -247,6 +247,35 @@ CREATE TABLE IF NOT EXISTS processing_status (
     updated_at TEXT NOT NULL,
     details_json TEXT
 );
+
+CREATE TABLE IF NOT EXISTS latest_quotes (
+    instrument_token INTEGER PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    exchange TEXT,
+    timestamp TEXT,
+    ingested_at TEXT,
+    last_price REAL,
+    last_quantity INTEGER,
+    volume INTEGER,
+    average_price REAL,
+    oi INTEGER,
+    total_buy_quantity INTEGER,
+    total_sell_quantity INTEGER,
+    best_bid_price REAL,
+    best_bid_quantity INTEGER,
+    best_ask_price REAL,
+    best_ask_quantity INTEGER,
+    bid_depth_5 INTEGER,
+    ask_depth_5 INTEGER,
+    spread REAL,
+    mid_price REAL,
+    depth_imbalance REAL,
+    volume_delta INTEGER,
+    oi_delta INTEGER,
+    price_delta REAL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_latest_quotes_symbol ON latest_quotes(symbol);
 """
 
 
@@ -782,6 +811,98 @@ class SQLiteStore:
             item["details"] = json.loads(raw) if raw else None
             out[str(item["job"])] = item
         return out
+
+    def upsert_latest_quotes(self, rows: Iterable[dict[str, Any]]) -> int:
+        """Replace the latest snapshot for each instrument_token. Not a tick log."""
+        payload = list(rows)
+        if not payload:
+            return 0
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connection() as conn:
+            conn.executemany(
+                """
+                INSERT INTO latest_quotes (
+                    instrument_token, symbol, exchange, timestamp, ingested_at,
+                    last_price, last_quantity, volume, average_price, oi,
+                    total_buy_quantity, total_sell_quantity,
+                    best_bid_price, best_bid_quantity,
+                    best_ask_price, best_ask_quantity,
+                    bid_depth_5, ask_depth_5, spread, mid_price, depth_imbalance,
+                    volume_delta, oi_delta, price_delta, updated_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                ON CONFLICT(instrument_token) DO UPDATE SET
+                    symbol=excluded.symbol,
+                    exchange=excluded.exchange,
+                    timestamp=excluded.timestamp,
+                    ingested_at=excluded.ingested_at,
+                    last_price=excluded.last_price,
+                    last_quantity=excluded.last_quantity,
+                    volume=excluded.volume,
+                    average_price=excluded.average_price,
+                    oi=excluded.oi,
+                    total_buy_quantity=excluded.total_buy_quantity,
+                    total_sell_quantity=excluded.total_sell_quantity,
+                    best_bid_price=excluded.best_bid_price,
+                    best_bid_quantity=excluded.best_bid_quantity,
+                    best_ask_price=excluded.best_ask_price,
+                    best_ask_quantity=excluded.best_ask_quantity,
+                    bid_depth_5=excluded.bid_depth_5,
+                    ask_depth_5=excluded.ask_depth_5,
+                    spread=excluded.spread,
+                    mid_price=excluded.mid_price,
+                    depth_imbalance=excluded.depth_imbalance,
+                    volume_delta=excluded.volume_delta,
+                    oi_delta=excluded.oi_delta,
+                    price_delta=excluded.price_delta,
+                    updated_at=excluded.updated_at
+                """,
+                [
+                    (
+                        r["instrument_token"],
+                        r.get("symbol"),
+                        r.get("exchange"),
+                        r.get("timestamp"),
+                        r.get("ingested_at"),
+                        r.get("last_price"),
+                        r.get("last_quantity"),
+                        r.get("volume"),
+                        r.get("average_price"),
+                        r.get("oi"),
+                        r.get("total_buy_quantity"),
+                        r.get("total_sell_quantity"),
+                        r.get("best_bid_price"),
+                        r.get("best_bid_quantity"),
+                        r.get("best_ask_price"),
+                        r.get("best_ask_quantity"),
+                        r.get("bid_depth_5"),
+                        r.get("ask_depth_5"),
+                        r.get("spread"),
+                        r.get("mid_price"),
+                        r.get("depth_imbalance"),
+                        r.get("volume_delta"),
+                        r.get("oi_delta"),
+                        r.get("price_delta"),
+                        now,
+                    )
+                    for r in payload
+                ],
+            )
+        return len(payload)
+
+    def fetch_latest_quote(self, symbol: str) -> dict[str, Any] | None:
+        wanted = symbol.strip()
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM latest_quotes
+                WHERE symbol = ? COLLATE NOCASE
+                LIMIT 1
+                """,
+                (wanted,),
+            ).fetchone()
+        return dict(row) if row else None
 
     def count_feature_logs_by_source(self, start: str, end: str) -> dict[str, int]:
         """Retrain composition — GROUP BY only, never fetch features_json."""

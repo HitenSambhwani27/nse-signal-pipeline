@@ -50,6 +50,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def health() -> dict[str, Any]:
         return read.health()
 
+    @app.get("/api/v1/quotes/{symbol:path}")
+    def quotes(symbol: str) -> dict[str, Any]:
+        return read.quote(symbol)
+
     # One-release aliases of the previous /v1 paths.
     @app.get("/v1/health")
     def health_alias() -> dict[str, Any]:

@@ -54,6 +54,7 @@ def _row_to_equity_info(
         segment=str(row.get("segment", "")),
         instrument_type=str(row.get("instrument_type", "EQ")),
         lot_size=int(row["lot_size"]) if row.get("lot_size") is not None else None,
+        tick_size=float(row["tick_size"]) if row.get("tick_size") is not None else None,
         subscribe_mode=subscribe_mode,
     )
 
@@ -139,6 +140,7 @@ def fetch_index_instruments(
             segment=segment,
             instrument_type=str(row.get("instrument_type", "")),
             lot_size=int(row["lot_size"]) if row.get("lot_size") is not None else None,
+            tick_size=float(row["tick_size"]) if row.get("tick_size") is not None else None,
             subscribe_mode="full",
         )
 
@@ -248,6 +250,7 @@ def build_index_option_chain(
                 strike=strike,
                 expiry=str(row.get("expiry")),
                 lot_size=int(row["lot_size"]) if row.get("lot_size") is not None else None,
+                tick_size=float(row["tick_size"]) if row.get("tick_size") is not None else None,
                 subscribe_mode="full",
             )
         )
@@ -303,6 +306,7 @@ def build_index_futures(
                     instrument_type="FUT",
                     expiry=str(row.get("expiry")),
                     lot_size=int(row["lot_size"]) if row.get("lot_size") is not None else None,
+                    tick_size=float(row["tick_size"]) if row.get("tick_size") is not None else None,
                     subscribe_mode=settings.futures.subscribe_mode,
                 )
             )

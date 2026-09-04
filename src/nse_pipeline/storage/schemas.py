@@ -44,6 +44,16 @@ class NormalizedTick:
     ask_prices: list[float] = field(default_factory=list)
     ask_quantities: list[int] = field(default_factory=list)
     ask_orders: list[int] = field(default_factory=list)
+    ingested_at: datetime | None = None
+    exchange_timestamp: datetime | None = None
+    last_trade_time: datetime | None = None
+    trade_date: str | None = None
+    total_buy_quantity: int | None = None
+    total_sell_quantity: int | None = None
+    ohlc_open: float | None = None
+    ohlc_high: float | None = None
+    ohlc_low: float | None = None
+    ohlc_close: float | None = None
 
     def to_row_dict(self) -> dict[str, Any]:
         """Convert to a flat dict suitable for pandas DataFrame rows."""
@@ -81,6 +91,7 @@ class InstrumentInfo:
     strike: float | None = None
     expiry: str | None = None
     lot_size: int | None = None
+    tick_size: float | None = None
     # WebSocket mode for this token: 'full' (depth) or 'quote' (no depth).
     subscribe_mode: str = "full"
 
@@ -95,6 +106,7 @@ class InstrumentInfo:
             "strike": self.strike,
             "expiry": self.expiry,
             "lot_size": self.lot_size,
+            "tick_size": self.tick_size,
             "subscribe_mode": self.subscribe_mode,
         }
 
@@ -110,5 +122,6 @@ class InstrumentInfo:
             strike=float(data["strike"]) if data.get("strike") is not None else None,
             expiry=str(data["expiry"]) if data.get("expiry") else None,
             lot_size=int(data["lot_size"]) if data.get("lot_size") is not None else None,
+            tick_size=float(data["tick_size"]) if data.get("tick_size") is not None else None,
             subscribe_mode=str(data.get("subscribe_mode", "full")),
         )

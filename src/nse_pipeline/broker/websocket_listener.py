@@ -1,7 +1,8 @@
 """
 Live WebSocket tick listener with reconnect and Parquet persistence.
 
-Uses KiteTicker from kiteconnect for real-time market depth (mode='full').
+Uses KiteTicker from kiteconnect. Dual-mode subscribe:
+Nifty 100 / index / options / futures = MODE_FULL; Nifty 500 minus 100 = MODE_QUOTE.
 """
 
 from __future__ import annotations
@@ -11,7 +12,6 @@ import signal
 import sys
 import threading
 import time
-from datetime import datetime, timezone
 from typing import Any
 
 from kiteconnect import KiteConnect
@@ -24,74 +24,15 @@ from nse_pipeline.broker.instruments import (
     tokens_by_subscribe_mode,
 )
 from nse_pipeline.config import Settings
+from nse_pipeline.market.latest import LatestQuoteTracker
+from nse_pipeline.market.normalize import normalize_tick
 from nse_pipeline.storage.parquet_writer import BufferedParquetWriter
-from nse_pipeline.storage.schemas import NormalizedTick
 from nse_pipeline.storage.sqlite_store import SQLiteStore
 
 
 logger = logging.getLogger(__name__)
 
-
-def _parse_depth_side(levels: list[dict[str, Any]] | None) -> tuple[list[float], list[int], list[int]]:
-    prices: list[float] = []
-    quantities: list[int] = []
-    orders: list[int] = []
-    if not levels:
-        return prices, quantities, orders
-    for level in levels:
-        prices.append(float(level.get("price", 0.0)))
-        quantities.append(int(level.get("quantity", 0)))
-        orders.append(int(level.get("orders", 0)))
-    return prices, quantities, orders
-
-
-def normalize_tick(
-    tick: dict[str, Any],
-    token_symbol_map: dict[int, str],
-    exchange_by_token: dict[int, str],
-) -> NormalizedTick | None:
-    """Convert raw Kite tick dict into our flat NormalizedTick schema."""
-    token = tick.get("instrument_token")
-    if token is None:
-        return None
-
-    token_int = int(token)
-    symbol = token_symbol_map.get(token_int)
-    if not symbol:
-        return None
-
-    timestamp = tick.get("timestamp")
-    if isinstance(timestamp, datetime):
-        ts = timestamp
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-    else:
-        ts = datetime.now(timezone.utc)
-
-    depth = tick.get("depth") or {}
-    bid_prices, bid_quantities, bid_orders = _parse_depth_side(depth.get("buy"))
-    ask_prices, ask_quantities, ask_orders = _parse_depth_side(depth.get("sell"))
-
-    oi_value = tick.get("oi")
-    oi_int = int(oi_value) if oi_value is not None else None
-
-    return NormalizedTick(
-        timestamp=ts,
-        instrument_token=token_int,
-        symbol=symbol,
-        exchange=exchange_by_token.get(token_int, "NSE"),
-        last_price=float(tick.get("last_price", 0.0)),
-        volume=int(tick.get("volume_traded", tick.get("volume", 0)) or 0),
-        last_quantity=int(tick.get("last_traded_quantity", tick.get("last_quantity", 0)) or 0),
-        average_price=float(tick.get("average_traded_price", tick.get("average_price", 0.0)) or 0.0),
-        oi=oi_int,
-        bid_prices=bid_prices,
-        bid_quantities=bid_quantities,
-        bid_orders=bid_orders,
-        ask_prices=ask_prices,
-        ask_quantities=ask_quantities,
-        ask_orders=ask_orders,
-    )
+_LATEST_PERSIST_SECONDS = 2.0
 
 
 class WebSocketIngestionService:
@@ -117,6 +58,8 @@ class WebSocketIngestionService:
         self.exchange_by_token = {i.instrument_token: i.exchange for i in self.instruments}
         self.full_tokens, self.quote_tokens = tokens_by_subscribe_mode(cache)
         self.tokens = self.full_tokens + self.quote_tokens
+        self._quotes = LatestQuoteTracker()
+        self._last_quote_persist = 0.0
 
         self._stop_event = threading.Event()
         self._connection_lost_event = threading.Event()
@@ -207,6 +150,7 @@ class WebSocketIngestionService:
                 continue
 
             flushed = self.writer.add_tick(normalized)
+            self._quotes.observe(normalized)
             self._rows_since_meta += 1
 
             if flushed > 0:
@@ -217,6 +161,19 @@ class WebSocketIngestionService:
                     rows_written=flushed,
                 )
                 self._rows_since_meta = 0
+
+    def _persist_latest_quotes(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and (now - self._last_quote_persist) < _LATEST_PERSIST_SECONDS:
+            return
+        rows = self._quotes.drain_dirty()
+        self._last_quote_persist = now
+        if not rows:
+            return
+        try:
+            self.store.upsert_latest_quotes(rows)
+        except Exception:
+            logger.exception("Failed to persist latest_quotes (%s instruments)", len(rows))
 
     def _install_signal_handlers(self) -> None:
         def handle_stop(signum, frame) -> None:
@@ -260,6 +217,7 @@ class WebSocketIngestionService:
             # Wait until user stop, socket close, or noreconnect.
             while not self._stop_event.is_set() and not self._connection_lost_event.is_set():
                 time.sleep(1.0)
+                self._persist_latest_quotes()
 
             if self._stop_event.is_set():
                 break
@@ -274,6 +232,7 @@ class WebSocketIngestionService:
             )
 
         flushed = self.writer.flush_all()
+        self._persist_latest_quotes(force=True)
         self.store.log_ingestion_event(
             event_type="shutdown",
             message="Ingestion service stopped",

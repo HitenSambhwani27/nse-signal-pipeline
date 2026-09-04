@@ -49,8 +49,9 @@ def compact_symbol_day(
     """
     Merge all ticks_*.parquet in raw_symbol_dir into compacted_symbol_dir/ticks.parquet.
 
-    Rows are ordered by timestamp. Duplicate rows (identical timestamp + token + LTP)
-    are dropped after concat so re-flushed minute buckets do not inflate counts.
+    Rows are ordered by timestamp. Duplicate *files* from re-flush still appear
+    as extra observations if the same packet is written twice; this merge does
+    not invent unique trade IDs and does not drop same-price consecutive ticks.
     """
     date_str = raw_symbol_dir.parent.name
     symbol = raw_symbol_dir.name
@@ -75,7 +76,9 @@ def compact_symbol_day(
 
     con = duckdb.connect(database=":memory:")
     try:
-        # ORDER BY timestamp; DISTINCT ON full row via QUALIFY for near-duplicates.
+        # Rows are ordered by timestamp. All observations are kept (union_by_name
+        # so additive tick columns survive). Re-flush of the same minute file
+        # concatenates; this is not a unique-trade filter.
         con.execute(
             f"""
             COPY (

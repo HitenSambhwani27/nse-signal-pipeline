@@ -78,6 +78,12 @@ def test_api_v1_envelope_and_null_probability(tmp_path: Path) -> None:
     assert health["health"]["api"] == "ok"
     assert health["health"]["database"] == "ok"
     assert health["health"]["processing_lag"] == "unknown"
+    assert health["health"]["instrument_cache"]["status"] == "unknown"
+    missing = client.get("/api/v1/quotes/RELIANCE").json()
+    assert missing["found"] is False
+    assert missing["quote"] is None
+    assert "maturity" in missing
+    assert "features_json" not in str(missing)
     assert client.get("/v1/maturity").json()["maturity"]["equity"]["tier"] == "suppressed"
 
 
@@ -91,6 +97,7 @@ def test_api_is_get_only(tmp_path: Path) -> None:
         "/api/v1/account",
         "/api/v1/decisions",
         "/api/v1/health",
+        "/api/v1/quotes/RELIANCE",
     ):
         assert client.post(path).status_code == 405
         assert client.put(path).status_code == 405
@@ -133,6 +140,7 @@ def test_schema_has_processing_status_and_query_indexes(tmp_path: Path) -> None:
             ).fetchall()
         }
         assert "processing_status" in tables
+        assert "latest_quotes" in tables
         sig_idx = {
             row[1] for row in conn.execute("PRAGMA index_list(signal_log)")
         }
@@ -168,3 +176,81 @@ def test_read_path_does_not_import_sklearn_or_logistic_models() -> None:
         assert "from joblib" not in text
         assert "LiveSignalEngine" not in text
         assert "KiteConnect" not in text
+
+
+def test_quotes_endpoint_serializes_latest_state(tmp_path: Path) -> None:
+    import json
+
+    settings, store = _seed(tmp_path)
+    settings.paths.instruments_cache.write_text(
+        json.dumps(
+            {
+                "updated_at": "2026-09-01T00:00:00Z",
+                "equity_depth": {
+                    "RELIANCE": {
+                        "instrument_token": 738561,
+                        "tradingsymbol": "RELIANCE",
+                        "exchange": "NSE",
+                        "name": "RELIANCE",
+                        "segment": "NSE",
+                        "instrument_type": "EQ",
+                        "lot_size": 1,
+                        "tick_size": 0.05,
+                        "subscribe_mode": "full",
+                    }
+                },
+                "options": [],
+                "futures": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    store.upsert_latest_quotes(
+        [
+            {
+                "instrument_token": 738561,
+                "symbol": "RELIANCE",
+                "exchange": "NSE",
+                "timestamp": "2026-09-04T03:45:00+00:00",
+                "ingested_at": "2026-09-04T03:45:00+00:00",
+                "last_price": 1400.5,
+                "last_quantity": 10,
+                "volume": 1000,
+                "average_price": 1399.0,
+                "oi": None,
+                "total_buy_quantity": 500,
+                "total_sell_quantity": 400,
+                "best_bid_price": 1400.4,
+                "best_bid_quantity": 20,
+                "best_ask_price": 1400.6,
+                "best_ask_quantity": 15,
+                "bid_depth_5": 100,
+                "ask_depth_5": 80,
+                "spread": 0.2,
+                "mid_price": 1400.5,
+                "depth_imbalance": 0.111111,
+                "volume_delta": 10,
+                "oi_delta": None,
+                "price_delta": 0.5,
+            }
+        ]
+    )
+    client = TestClient(create_app(settings))
+    payload = client.get("/api/v1/quotes/RELIANCE").json()
+    assert payload["found"] is True
+    quote = payload["quote"]
+    assert quote["symbol"] == "RELIANCE"
+    assert quote["last_price"] == 1400.5
+    assert quote["last_quantity"] == 10
+    assert quote["change"] == 0.5
+    assert quote["buy_quantity"] == 500
+    assert quote["sell_quantity"] == 400
+    assert quote["spread"] == 0.2
+    assert quote["instrument_type"] == "EQ"
+    assert quote["lot_size"] == 1
+    assert quote["tick_size"] == 0.05
+    assert "features_json" not in quote
+    assert "executed" not in str(quote).lower()
+    health = client.get("/api/v1/health").json()
+    assert health["health"]["instrument_cache"]["status"] == "ok"
+

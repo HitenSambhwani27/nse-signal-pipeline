@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import unquote
 
 from nse_pipeline.config import Settings
+from nse_pipeline.market.cache_health import instrument_cache_health, lookup_instrument_meta
+from nse_pipeline.market.latest import public_quote
 from nse_pipeline.signals.maturity import (
     CLASS_FROM_TRACK,
     maturity_snapshot,
@@ -93,4 +97,30 @@ class SqliteUiReadModel:
         blob.setdefault("api", "ok")
         blob.setdefault("database", "ok")
         blob.setdefault("processing_lag", "unknown")
+        blob["instrument_cache"] = self._instrument_cache_health()
         return self._envelope(health=blob)
+
+    def quote(self, symbol: str) -> dict[str, Any]:
+        wanted = unquote(symbol).strip()
+        row = self.store.fetch_latest_quote(wanted)
+        cache = self._load_instrument_cache()
+        meta = lookup_instrument_meta(cache, wanted) if cache else None
+        if row is None:
+            return self._envelope(found=False, quote=None)
+        return self._envelope(found=True, quote=public_quote(row, meta=meta))
+
+    def _load_instrument_cache(self) -> dict[str, Any] | None:
+        path = self.settings.paths.instruments_cache
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _instrument_cache_health(self) -> dict[str, Any]:
+        cache = self._load_instrument_cache()
+        if cache is None:
+            return {"status": "unknown", "reason": "cache_file_missing"}
+        return instrument_cache_health(cache)
