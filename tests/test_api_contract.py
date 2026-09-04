@@ -75,6 +75,9 @@ def test_api_v1_envelope_and_null_probability(tmp_path: Path) -> None:
 
     health = client.get("/api/v1/health").json()
     assert health["health"]["processing_status"]["features"]["status"] == "unknown"
+    assert health["health"]["api"] == "ok"
+    assert health["health"]["database"] == "ok"
+    assert health["health"]["processing_lag"] == "unknown"
     assert client.get("/v1/maturity").json()["maturity"]["equity"]["tier"] == "suppressed"
 
 
@@ -151,3 +154,17 @@ def test_create_app_does_not_construct_engine(tmp_path: Path, monkeypatch) -> No
     client = TestClient(create_app(settings))
     assert client.get("/api/v1/health").status_code == 200
     assert client.get("/api/v1/maturity").status_code == 200
+
+
+def test_read_path_does_not_import_sklearn_or_logistic_models() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "src" / "nse_pipeline"
+    for rel in ("api/app.py", "api/read_model.py"):
+        text = (root / rel).read_text(encoding="utf-8")
+        assert "sklearn" not in text
+        assert "models.logistic" not in text
+        assert "import joblib" not in text
+        assert "from joblib" not in text
+        assert "LiveSignalEngine" not in text
+        assert "KiteConnect" not in text

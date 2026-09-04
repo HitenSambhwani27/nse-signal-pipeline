@@ -7,8 +7,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from nse_pipeline.config import Settings
-from nse_pipeline.models.logistic import CLASS_FROM_TRACK
-from nse_pipeline.signals.maturity import maturity_snapshot, signal_public_view
+from nse_pipeline.signals.maturity import (
+    CLASS_FROM_TRACK,
+    maturity_snapshot,
+    signal_public_view,
+)
 from nse_pipeline.storage.sqlite_store import SQLiteStore
 
 MATURITY_CACHE_TTL_S = 30.0
@@ -86,4 +89,8 @@ class SqliteUiReadModel:
         )
 
     def health(self) -> dict[str, Any]:
-        return self._envelope(health=self.store.pipeline_health())
+        blob = self.store.pipeline_health()
+        blob.setdefault("api", "ok")
+        blob.setdefault("database", "ok")
+        blob.setdefault("processing_lag", "unknown")
+        return self._envelope(health=blob)

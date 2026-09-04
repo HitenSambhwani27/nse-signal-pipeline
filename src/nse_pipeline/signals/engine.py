@@ -14,8 +14,8 @@ from nse_pipeline.algorithms.logistic import LogisticAlgorithm
 from nse_pipeline.algorithms.unavailable import UnavailableAlgorithm
 from nse_pipeline.config import Settings
 from nse_pipeline.contracts.algorithms import Algorithm, AlgorithmResult
-from nse_pipeline.models.logistic import CLASS_FROM_TRACK
 from nse_pipeline.signals.maturity import (
+    CLASS_FROM_TRACK,
     maturity_public_view,
     pooled_live_days,
     signal_public_view,
