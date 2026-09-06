@@ -77,6 +77,8 @@ class OptionUnderlyingSettings:
     # weekly = Nifty Tuesday series; monthly = Bank Nifty (its only series).
     # Nifty monthly is out of scope — see TRADE_OFFS.md.
     series: str = "weekly"
+    expiry_count: int = 1
+    subscribe_mode: str = "full"
 
 
 @dataclass
@@ -91,6 +93,53 @@ class FuturesSettings:
     underlyings: list[str]
     contract_count: int
     subscribe_mode: str
+
+
+@dataclass
+class StockDerivativesSettings:
+    """NIFTY100 ∩ currently listed F&O. Conservative defaults; not every strike."""
+
+    enabled: bool = True
+    futures_enabled: bool = True
+    options_enabled: bool = True
+    futures_contract_count: int = 1
+    futures_subscribe_mode: str = "full"
+    options_strikes_each_side: int = 5
+    options_expiry_count: int = 1
+    options_atm_subscribe_mode: str = "full"
+    options_subscribe_mode: str = "full"
+    max_stock_option_contracts: int = 600
+    max_total_tokens: int = 2500
+
+
+@dataclass
+class MarketAnalyticsSettings:
+    """Deterministic thresholds. Null when baselines are insufficient."""
+
+    atm_method: str = "nearest_listed"
+    pcr_atm_strikes: int = 5
+    max_pain_min_strikes: int = 11
+    max_pain_min_completeness: float = 0.70
+    large_trade_percentile: float = 95.0
+    very_large_trade_percentile: float = 99.0
+    extreme_trade_percentile: float = 99.9
+    volume_elevated_ratio: float = 2.0
+    volume_burst_ratio: float = 3.0
+    volume_extreme_ratio: float = 5.0
+    activity_elevated_ratio: float = 2.0
+    activity_burst_ratio: float = 3.0
+    aggressor_tolerance_bps: float = 2.0
+    depth_shock_pct: float = 40.0
+    spread_widen_pct: float = 50.0
+    baseline_min_observations: int = 30
+    tod_bucket_minutes: int = 15
+    chart_max_points: int = 500
+    unusual_high_score: float = 70.0
+    sample_every_seconds: int = 60
+    futures_basis_max_age_seconds: float = 10.0
+    watchlist_default: list[str] = field(
+        default_factory=lambda: ["NIFTY 50", "NIFTY BANK", "RELIANCE", "HDFCBANK", "INFY"]
+    )
 
 
 @dataclass
@@ -259,6 +308,10 @@ class Settings:
     maturity_gate: MaturityGateSettings = field(default_factory=MaturityGateSettings)
     live_signal: LiveSignalSettings = field(default_factory=LiveSignalSettings)
     retrain: RetrainSettings = field(default_factory=RetrainSettings)
+    stock_derivatives: StockDerivativesSettings = field(
+        default_factory=StockDerivativesSettings
+    )
+    analytics: MarketAnalyticsSettings = field(default_factory=MarketAnalyticsSettings)
     raw_config: dict[str, Any] = field(repr=False, default_factory=dict)
 
     def ensure_directories(self) -> None:
@@ -336,6 +389,8 @@ def load_settings(config_path: Path | None = None) -> Settings:
                 strikes_each_side=int(row["strikes_each_side"]),
                 strike_interval=float(row["strike_interval"]),
                 series=str(row.get("series") or default_series),
+                expiry_count=int(row.get("expiry_count", 1)),
+                subscribe_mode=str(row.get("subscribe_mode", "full")),
             )
         )
     options = OptionsSettings(
@@ -528,6 +583,55 @@ def load_settings(config_path: Path | None = None) -> Settings:
         auto_promote=bool(rt_cfg.get("auto_promote", False)),
     )
 
+    sd_cfg = config.get("stock_derivatives") or {}
+    stock_derivatives = StockDerivativesSettings(
+        enabled=bool(sd_cfg.get("enabled", True)),
+        futures_enabled=bool(sd_cfg.get("futures_enabled", True)),
+        options_enabled=bool(sd_cfg.get("options_enabled", True)),
+        futures_contract_count=int(sd_cfg.get("futures_contract_count", 1)),
+        futures_subscribe_mode=str(sd_cfg.get("futures_subscribe_mode", "full")),
+        options_strikes_each_side=int(sd_cfg.get("options_strikes_each_side", 5)),
+        options_expiry_count=int(sd_cfg.get("options_expiry_count", 1)),
+        options_atm_subscribe_mode=str(sd_cfg.get("options_atm_subscribe_mode", "full")),
+        options_subscribe_mode=str(sd_cfg.get("options_subscribe_mode", "full")),
+        max_stock_option_contracts=int(sd_cfg.get("max_stock_option_contracts", 600)),
+        max_total_tokens=int(sd_cfg.get("max_total_tokens", 2500)),
+    )
+
+    an_cfg = config.get("analytics") or {}
+    analytics = MarketAnalyticsSettings(
+        atm_method=str(an_cfg.get("atm_method", "nearest_listed")),
+        pcr_atm_strikes=int(an_cfg.get("pcr_atm_strikes", 5)),
+        max_pain_min_strikes=int(an_cfg.get("max_pain_min_strikes", 11)),
+        max_pain_min_completeness=float(an_cfg.get("max_pain_min_completeness", 0.70)),
+        large_trade_percentile=float(an_cfg.get("large_trade_percentile", 95.0)),
+        very_large_trade_percentile=float(an_cfg.get("very_large_trade_percentile", 99.0)),
+        extreme_trade_percentile=float(an_cfg.get("extreme_trade_percentile", 99.9)),
+        volume_elevated_ratio=float(an_cfg.get("volume_elevated_ratio", 2.0)),
+        volume_burst_ratio=float(an_cfg.get("volume_burst_ratio", 3.0)),
+        volume_extreme_ratio=float(an_cfg.get("volume_extreme_ratio", 5.0)),
+        activity_elevated_ratio=float(an_cfg.get("activity_elevated_ratio", 2.0)),
+        activity_burst_ratio=float(an_cfg.get("activity_burst_ratio", 3.0)),
+        aggressor_tolerance_bps=float(an_cfg.get("aggressor_tolerance_bps", 2.0)),
+        depth_shock_pct=float(an_cfg.get("depth_shock_pct", 40.0)),
+        spread_widen_pct=float(an_cfg.get("spread_widen_pct", 50.0)),
+        baseline_min_observations=int(an_cfg.get("baseline_min_observations", 30)),
+        tod_bucket_minutes=int(an_cfg.get("tod_bucket_minutes", 15)),
+        chart_max_points=int(an_cfg.get("chart_max_points", 500)),
+        unusual_high_score=float(an_cfg.get("unusual_high_score", 70.0)),
+        sample_every_seconds=int(an_cfg.get("sample_every_seconds", 60)),
+        futures_basis_max_age_seconds=float(
+            an_cfg.get("futures_basis_max_age_seconds", 10.0)
+        ),
+        watchlist_default=[
+            str(x)
+            for x in (
+                an_cfg.get("watchlist_default")
+                or ["NIFTY 50", "NIFTY BANK", "RELIANCE", "HDFCBANK", "INFY"]
+            )
+        ],
+    )
+
     settings = Settings(
         paths=paths,
         universe=universe,
@@ -548,6 +652,8 @@ def load_settings(config_path: Path | None = None) -> Settings:
         maturity_gate=maturity_gate,
         live_signal=live_signal,
         retrain=retrain,
+        stock_derivatives=stock_derivatives,
+        analytics=analytics,
         raw_config=config,
     )
     settings.ensure_directories()

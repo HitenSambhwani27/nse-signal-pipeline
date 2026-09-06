@@ -20,6 +20,15 @@ from kiteconnect import KiteConnect
 from nse_pipeline.broker.nse_membership import refresh_membership
 from nse_pipeline.broker.option_series import filter_rows_by_series
 from nse_pipeline.config import OptionUnderlyingSettings, Settings
+from nse_pipeline.market.universe import (
+    allocate_stock_option_slots,
+    collect_stock_option_slots,
+    current_and_next_expiries,
+    fo_names_from_nfo_rows,
+    nifty100_fo_eligible,
+    stock_option_subscribe_mode,
+    summarize_stock_option_allocation,
+)
 from nse_pipeline.storage.schemas import InstrumentInfo
 
 
@@ -204,11 +213,11 @@ def build_index_option_chain(
 
     today = date.today()
     expiries = sorted({row["_expiry_date"] for row in option_rows})
-    target_expiry = _pick_nearest_expiries(expiries, today, 1)[0]
-    expiry_rows = [row for row in option_rows if row["_expiry_date"] == target_expiry]
-    strikes = sorted({float(row["strike"]) for row in expiry_rows})
-    if not strikes:
-        raise ValueError(f"No strikes for {underlying.name} expiry {target_expiry}")
+    selected_expiries = current_and_next_expiries(
+        expiries, today, getattr(underlying, "expiry_count", 1) or 1
+    )
+    if not selected_expiries:
+        raise ValueError(f"No current/next expiries for {underlying.name} on {exchange}")
 
     quote = kite.quote([underlying.spot_quote])
     if underlying.spot_quote in quote:
@@ -218,44 +227,49 @@ def build_index_option_chain(
         spot_price = float(quote[first_key]["last_price"])
 
     interval = underlying.strike_interval
-    atm_strike = round(spot_price / interval) * interval
-
-    selected_strikes: set[float] = set()
-    for offset in range(-underlying.strikes_each_side, underlying.strikes_each_side + 1):
-        strike = atm_strike + (offset * interval)
-        if strike in strikes:
-            selected_strikes.add(strike)
-
-    if not selected_strikes:
-        closest = min(strikes, key=lambda s: abs(s - atm_strike))
-        center_idx = strikes.index(closest)
-        half = underlying.strikes_each_side
-        start = max(0, center_idx - half)
-        end = min(len(strikes), center_idx + half + 1)
-        selected_strikes = set(strikes[start:end])
-
+    subscribe_mode = getattr(underlying, "subscribe_mode", "full") or "full"
     chain: list[InstrumentInfo] = []
-    for row in expiry_rows:
-        strike = float(row["strike"])
-        if strike not in selected_strikes:
+    for target_expiry in selected_expiries:
+        expiry_rows = [row for row in option_rows if row["_expiry_date"] == target_expiry]
+        strikes = sorted({float(row["strike"]) for row in expiry_rows})
+        if not strikes:
             continue
-        chain.append(
-            InstrumentInfo(
-                instrument_token=int(row["instrument_token"]),
-                tradingsymbol=str(row["tradingsymbol"]),
-                exchange=str(row.get("exchange", exchange)),
-                name=str(row.get("name", underlying.name)),
-                segment=str(row.get("segment", "")),
-                instrument_type=str(row.get("instrument_type", "")),
-                strike=strike,
-                expiry=str(row.get("expiry")),
-                lot_size=int(row["lot_size"]) if row.get("lot_size") is not None else None,
-                tick_size=float(row["tick_size"]) if row.get("tick_size") is not None else None,
-                subscribe_mode="full",
-            )
-        )
+        atm = atm_strike(spot_price, strikes, interval=interval)
+        selected_strikes: set[float] = set()
+        if atm is not None:
+            for offset in range(-underlying.strikes_each_side, underlying.strikes_each_side + 1):
+                strike = atm + (offset * interval)
+                if strike in strikes:
+                    selected_strikes.add(strike)
+        if not selected_strikes:
+            closest = min(strikes, key=lambda s: abs(s - spot_price))
+            center_idx = strikes.index(closest)
+            half = underlying.strikes_each_side
+            start = max(0, center_idx - half)
+            end = min(len(strikes), center_idx + half + 1)
+            selected_strikes = set(strikes[start:end])
 
-    chain.sort(key=lambda x: (x.name, x.strike or 0.0, x.instrument_type))
+        for row in expiry_rows:
+            strike = float(row["strike"])
+            if strike not in selected_strikes:
+                continue
+            chain.append(
+                InstrumentInfo(
+                    instrument_token=int(row["instrument_token"]),
+                    tradingsymbol=str(row["tradingsymbol"]),
+                    exchange=str(row.get("exchange", exchange)),
+                    name=str(row.get("name", underlying.name)),
+                    segment=str(row.get("segment", "")),
+                    instrument_type=str(row.get("instrument_type", "")),
+                    strike=strike,
+                    expiry=str(row.get("expiry")),
+                    lot_size=int(row["lot_size"]) if row.get("lot_size") is not None else None,
+                    tick_size=float(row["tick_size"]) if row.get("tick_size") is not None else None,
+                    subscribe_mode=subscribe_mode,
+                )
+            )
+
+    chain.sort(key=lambda x: (x.name, x.expiry or "", x.strike or 0.0, x.instrument_type))
     return chain
 
 
@@ -315,6 +329,174 @@ def build_index_futures(
     return futures
 
 
+def _quote_last_prices(kite: KiteConnect, keys: list[str]) -> dict[str, float]:
+    prices: dict[str, float] = {}
+    for start in range(0, len(keys), 200):
+        chunk = keys[start : start + 200]
+        payload = kite.quote(chunk)
+        for key, data in payload.items():
+            symbol = str(key).split(":")[-1]
+            last = (data or {}).get("last_price")
+            if last is not None:
+                prices[symbol] = float(last)
+    return prices
+
+
+def _info_from_nfo_row(
+    row: dict[str, Any],
+    *,
+    subscribe_mode: str,
+    exchange: str,
+) -> InstrumentInfo:
+    return InstrumentInfo(
+        instrument_token=int(row["instrument_token"]),
+        tradingsymbol=str(row["tradingsymbol"]),
+        exchange=str(row.get("exchange", exchange)),
+        name=str(row.get("name", "")),
+        segment=str(row.get("segment", "")),
+        instrument_type=str(row.get("instrument_type", "")),
+        strike=float(row["strike"]) if row.get("strike") not in (None, 0, 0.0) else None,
+        expiry=str(row.get("expiry")) if row.get("expiry") else None,
+        lot_size=int(row["lot_size"]) if row.get("lot_size") is not None else None,
+        tick_size=float(row["tick_size"]) if row.get("tick_size") is not None else None,
+        subscribe_mode=subscribe_mode,
+    )
+
+
+def build_stock_futures(
+    settings: Settings,
+    eligible: list[str],
+    nfo_rows: list[dict[str, Any]],
+    *,
+    token_budget: int,
+) -> list[InstrumentInfo]:
+    cfg = settings.stock_derivatives
+    wanted = {s.upper() for s in eligible}
+    by_name: dict[str, list[dict[str, Any]]] = {name: [] for name in wanted}
+    today = date.today()
+    for row in nfo_rows:
+        name = str(row.get("name", "")).upper()
+        if name not in wanted:
+            continue
+        if str(row.get("instrument_type", "")).upper() != "FUT":
+            continue
+        expiry = _parse_expiry(row.get("expiry"))
+        if expiry is None:
+            continue
+        copy = dict(row)
+        copy["_expiry_date"] = expiry
+        by_name[name].append(copy)
+
+    futures: list[InstrumentInfo] = []
+    for name in eligible:
+        fut_rows = by_name.get(name.upper()) or []
+        if not fut_rows:
+            continue
+        try:
+            expiries = _pick_nearest_expiries(
+                [r["_expiry_date"] for r in fut_rows],
+                today,
+                cfg.futures_contract_count,
+            )
+        except ValueError:
+            continue
+        for row in fut_rows:
+            if row["_expiry_date"] not in expiries:
+                continue
+            if len(futures) >= token_budget:
+                logger.warning("Stock futures truncated at token budget %s", token_budget)
+                return futures
+            futures.append(
+                _info_from_nfo_row(
+                    row,
+                    subscribe_mode=cfg.futures_subscribe_mode,
+                    exchange=settings.futures.exchange,
+                )
+            )
+    futures.sort(key=lambda x: (x.name, x.expiry or "", x.tradingsymbol))
+    return futures
+
+
+def build_stock_option_chains(
+    kite: KiteConnect,
+    settings: Settings,
+    eligible: list[str],
+    nfo_rows: list[dict[str, Any]],
+    *,
+    token_budget: int,
+) -> tuple[list[InstrumentInfo], dict[str, Any]]:
+    cfg = settings.stock_derivatives
+    wanted = {s.upper() for s in eligible}
+    by_name: dict[str, list[dict[str, Any]]] = {name: [] for name in wanted}
+    today = date.today()
+    for row in nfo_rows:
+        name = str(row.get("name", "")).upper()
+        if name not in wanted:
+            continue
+        if str(row.get("instrument_type", "")).upper() not in {"CE", "PE"}:
+            continue
+        expiry = _parse_expiry(row.get("expiry"))
+        if expiry is None:
+            continue
+        copy = dict(row)
+        copy["_expiry_date"] = expiry
+        by_name[name].append(copy)
+
+    spots = _quote_last_prices(
+        kite, [f"NSE:{symbol}" for symbol in eligible if (by_name.get(symbol.upper()) or [])]
+    )
+    slots, listed_names, uncovered = collect_stock_option_slots(
+        eligible,
+        by_name,
+        spots,
+        today=today,
+        expiry_count=cfg.options_expiry_count,
+        strikes_each_side=cfg.options_strikes_each_side,
+    )
+    cap = min(max(0, int(token_budget)), int(cfg.max_stock_option_contracts))
+    selected, truncated = allocate_stock_option_slots(slots, max_contracts=cap)
+    atm_mode = cfg.options_atm_subscribe_mode
+    wing_mode = cfg.options_subscribe_mode
+    chain: list[InstrumentInfo] = []
+    for slot in selected:
+        chain.append(
+            _info_from_nfo_row(
+                slot.row,
+                subscribe_mode=stock_option_subscribe_mode(
+                    slot.distance_from_atm,
+                    atm_mode=atm_mode,
+                    wing_mode=wing_mode,
+                ),
+                exchange=settings.options.exchange,
+            )
+        )
+    chain.sort(key=lambda x: (x.name, x.expiry or "", x.strike or 0.0, x.instrument_type))
+    meta = summarize_stock_option_allocation(
+        all_slots=slots,
+        selected=selected,
+        listed_underlyings=listed_names,
+        uncovered_no_atm=uncovered,
+        truncated=truncated,
+        atm_mode=atm_mode,
+        wing_mode=wing_mode,
+    )
+    if truncated:
+        logger.warning(
+            "Stock options truncated at budget contracts=%s eligible=%s",
+            len(chain),
+            len(slots),
+        )
+    logger.info(
+        "Stock options allocation eligible_underlyings=%s selected=%s full=%s quote=%s truncated=%s",
+        meta["stock_options_eligible_count"],
+        meta["selected_contract_count"],
+        meta["stock_options_full_count"],
+        meta["stock_options_quote_count"],
+        meta["truncated"],
+    )
+    return chain, meta
+
+
 def refresh_instrument_cache(
     kite: KiteConnect,
     settings: Settings,
@@ -359,6 +541,48 @@ def refresh_instrument_cache(
 
     futures = build_index_futures(kite, settings, nfo_rows=nfo_rows)
 
+    fo_names = fo_names_from_nfo_rows(nfo_rows)
+    fo_eligible = nifty100_fo_eligible(membership.nifty100, fo_names)
+    stock_futures: list[InstrumentInfo] = []
+    stock_options: list[InstrumentInfo] = []
+    sd = settings.stock_derivatives
+    base_total = (
+        len(depth_equities)
+        + len(quote_equities)
+        + len(indices)
+        + len(options)
+        + len(futures)
+    )
+    remaining = max(0, sd.max_total_tokens - base_total)
+    option_selection: dict[str, Any] = {
+        "truncated": False,
+        "stock_options_eligible_count": 0,
+        "stock_options_full_count": 0,
+        "stock_options_quote_count": 0,
+        "eligible_contract_count": 0,
+        "selected_contract_count": 0,
+        "atm_covered_underlyings": [],
+        "uncovered_no_atm": [],
+        "by_underlying": {},
+    }
+    if sd.enabled and remaining > 0:
+        if sd.futures_enabled:
+            stock_futures = build_stock_futures(
+                settings, fo_eligible, nfo_rows, token_budget=remaining
+            )
+            remaining = max(0, remaining - len(stock_futures))
+        if sd.options_enabled and remaining > 0:
+            stock_options, option_selection = build_stock_option_chains(
+                kite, settings, fo_eligible, nfo_rows, token_budget=remaining
+            )
+        elif sd.options_enabled:
+            option_selection["truncated"] = True
+    elif sd.enabled and sd.options_enabled:
+        option_selection["truncated"] = True
+
+    all_options = options + stock_options
+    all_futures = futures + stock_futures
+
     payload: dict[str, Any] = {
         "updated_at": datetime.utcnow().isoformat() + "Z",
         "membership": membership.to_dict(),
@@ -369,20 +593,49 @@ def refresh_instrument_cache(
             symbol: info.to_cache_dict() for symbol, info in quote_equities.items()
         },
         "index": {symbol: info.to_cache_dict() for symbol, info in indices.items()},
-        "options": [info.to_cache_dict() for info in options],
-        "futures": [info.to_cache_dict() for info in futures],
+        "options": [info.to_cache_dict() for info in all_options],
+        "futures": [info.to_cache_dict() for info in all_futures],
+        "fo_eligible_nifty100": fo_eligible,
+        "universe": {
+            "configured_index_options": [u.name for u in settings.options.underlyings],
+            "configured_index_futures": list(settings.futures.underlyings),
+            "stock_derivatives_enabled": sd.enabled,
+            "nifty100_fo_eligible_count": len(fo_eligible),
+            "selected_stock_futures": len(stock_futures),
+            "selected_stock_options": len(stock_options),
+            "stock_options_full_count": option_selection.get("stock_options_full_count", 0),
+            "stock_options_quote_count": option_selection.get("stock_options_quote_count", 0),
+            "stock_options_eligible_count": option_selection.get(
+                "stock_options_eligible_count", 0
+            ),
+            "option_selection": option_selection,
+            "note": (
+                "configured != selected != live. Live tokens are whatever the "
+                "currently running ingest process loaded at startup."
+            ),
+        },
         "counts": {
             "equity_depth": len(depth_equities),
             "equity_quote": len(quote_equities),
             "index": len(indices),
-            "options": len(options),
-            "futures": len(futures),
+            "options": len(all_options),
+            "index_options": len(options),
+            "stock_options": len(stock_options),
+            "stock_options_full": option_selection.get("stock_options_full_count", 0),
+            "stock_options_quote": option_selection.get("stock_options_quote_count", 0),
+            "stock_options_eligible": option_selection.get(
+                "stock_options_eligible_count", 0
+            ),
+            "futures": len(all_futures),
+            "index_futures": len(futures),
+            "stock_futures": len(stock_futures),
+            "fo_eligible_nifty100": len(fo_eligible),
             "total": (
                 len(depth_equities)
                 + len(quote_equities)
                 + len(indices)
-                + len(options)
-                + len(futures)
+                + len(all_options)
+                + len(all_futures)
             ),
         },
     }
@@ -392,10 +645,19 @@ def refresh_instrument_cache(
         info.instrument_token
         for info in list(depth_equities.values())
         + list(indices.values())
-        + options
-        + futures
+        + all_options
+        + all_futures
+        if info.subscribe_mode != "quote"
     }
-    quote_tokens = {info.instrument_token for info in quote_equities.values()}
+    quote_tokens = {
+        info.instrument_token
+        for info in list(quote_equities.values())
+        + all_options
+        + all_futures
+        if info.subscribe_mode == "quote"
+    }
+    # Equities quote set already quote-mode.
+    quote_tokens |= {info.instrument_token for info in quote_equities.values()}
     token_overlap = full_tokens & quote_tokens
     if token_overlap:
         raise RuntimeError(

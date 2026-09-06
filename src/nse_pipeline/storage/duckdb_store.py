@@ -14,6 +14,7 @@ import duckdb
 import pandas as pd
 
 from nse_pipeline.config import Settings
+from nse_pipeline.market.quality import dedupe_tick_dataframe
 
 
 class DuckDBTickStore:
@@ -110,7 +111,7 @@ class DuckDBTickStore:
             params.append(end_ts)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         sql = f"SELECT * FROM read_parquet('{path_sql}'){where} ORDER BY timestamp"
-        return self.query(sql, params or None)
+        return dedupe_tick_dataframe(self.query(sql, params or None))
 
     def read_candles(self, date_str: str, symbol: str) -> pd.DataFrame:
         path = self._candles_path(date_str, symbol)
@@ -184,11 +185,13 @@ class DuckDBTickStore:
         glob_path = str(self.compacted_dir / date_str / "*" / "ticks.parquet").replace(
             "\\", "/"
         )
-        return self.query(
-            f"""
+        return dedupe_tick_dataframe(
+            self.query(
+                f"""
             SELECT * FROM read_parquet('{glob_path}', union_by_name=true, hive_partitioning=false)
             ORDER BY symbol, timestamp
             """
+            )
         )
 
     def _daily_path(self, date_str: str, symbol: str) -> Path:

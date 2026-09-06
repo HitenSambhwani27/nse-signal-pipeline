@@ -7,8 +7,9 @@ Prerequisites:
   - config/instruments_cache.json (created by scripts/00_kite_auth.py)
   - Market hours for live ticks (script will still connect off-hours but may be quiet)
 
-On startup, if NSE membership snapshot is older than
-universe.membership_max_age_days, CSVs + instrument cache are refreshed.
+On startup, refresh the instrument cache when membership is stale, the cache
+file is missing, or cached option/future expiries are already past.
+Does not restart an already-running ingest process.
 """
 
 from __future__ import annotations
@@ -20,13 +21,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from nse_pipeline.broker.auth import get_authenticated_kite  # noqa: E402
-from nse_pipeline.broker.instruments import refresh_instrument_cache  # noqa: E402
+from nse_pipeline.broker.instruments import (  # noqa: E402
+    load_instrument_cache,
+    refresh_instrument_cache,
+)
 from nse_pipeline.broker.nse_membership import membership_is_stale  # noqa: E402
 from nse_pipeline.broker.websocket_listener import (  # noqa: E402
     WebSocketIngestionService,
     configure_logging,
 )
 from nse_pipeline.config import load_settings
+from nse_pipeline.market.cache_health import cache_file_needs_refresh  # noqa: E402
 
 
 def main() -> int:
@@ -39,10 +44,29 @@ def main() -> int:
         print(exc)
         return 1
 
-    if membership_is_stale(settings) or not settings.paths.instruments_cache.exists():
+    cache = None
+    cache_exists = settings.paths.instruments_cache.exists()
+    if cache_exists:
+        try:
+            cache = load_instrument_cache(settings.paths.instruments_cache)
+        except (OSError, ValueError):
+            cache = None
+            cache_exists = False
+
+    option_expiry_count = max(
+        (getattr(u, "expiry_count", 1) or 1) for u in settings.options.underlyings
+    ) if settings.options.underlyings else 1
+    needs_refresh = cache_file_needs_refresh(
+        cache,
+        membership_stale=membership_is_stale(settings),
+        cache_exists=cache_exists,
+        option_expiry_count=option_expiry_count,
+        future_contract_count=settings.futures.contract_count,
+    )
+    if needs_refresh:
         print(
-            "Membership/instrument cache missing or stale "
-            f"(>{settings.universe.membership_max_age_days} days) — refreshing..."
+            "Membership/instrument cache missing, stale, or holding expired "
+            "derivatives — refreshing via Kite instrument master..."
         )
         try:
             cache = refresh_instrument_cache(kite, settings, force_membership=True)

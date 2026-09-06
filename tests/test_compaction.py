@@ -146,6 +146,49 @@ def test_compact_symbol_day_merges_and_is_idempotent(tmp_path: Path) -> None:
         assert list(df["last_price"]) == [100.0, 101.0]
 
 
+def test_compact_and_read_collapses_consecutive_reflush_duplicates(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    symbol_dir = settings.paths.raw_dir / "2026-09-04" / "RELIANCE"
+    ts = datetime(2026, 9, 4, 3, 45, 1, tzinfo=timezone.utc)
+    later = datetime(2026, 9, 4, 3, 45, 2, tzinfo=timezone.utc)
+    base = {
+        "instrument_token": 1,
+        "symbol": "RELIANCE",
+        "exchange": "NSE",
+        "last_price": 100.0,
+        "volume": 1,
+        "last_quantity": 1,
+        "average_price": 100.0,
+        "oi": None,
+        "bid_prices": [99.0],
+        "bid_quantities": [10],
+        "bid_orders": [1],
+        "ask_prices": [101.0],
+        "ask_quantities": [10],
+        "ask_orders": [1],
+    }
+    duplicate = {**base, "timestamp": ts}
+    distinct = {**base, "timestamp": later, "last_price": 101.0}
+    _write_minute(symbol_dir / "ticks_0345.parquet", [duplicate])
+    _write_minute(symbol_dir / "ticks_0345b.parquet", [duplicate, distinct])
+
+    out_dir = settings.paths.compacted_dir / "2026-09-04" / "RELIANCE"
+    result = compact_symbol_day(
+        raw_symbol_dir=symbol_dir,
+        compacted_symbol_dir=out_dir,
+        archive_minute_files=False,
+        archive_subdir="_minute_parts",
+    )
+    assert result.rows == 2
+    raw_first = pd.read_parquet(symbol_dir / "ticks_0345.parquet")
+    assert len(raw_first) == 1
+
+    with DuckDBTickStore(settings) as store:
+        df = store.read_ticks("2026-09-04", "RELIANCE")
+        assert len(df) == 2
+        assert list(df["last_price"]) == [100.0, 101.0]
+
+
 def test_compact_date_skips_candle_only_folders(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     day = "2026-08-03"

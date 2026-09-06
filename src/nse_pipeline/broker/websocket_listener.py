@@ -24,6 +24,7 @@ from nse_pipeline.broker.instruments import (
     tokens_by_subscribe_mode,
 )
 from nse_pipeline.config import Settings
+from nse_pipeline.market.activity import tod_bucket, trade_notional
 from nse_pipeline.market.latest import LatestQuoteTracker
 from nse_pipeline.market.normalize import normalize_tick
 from nse_pipeline.storage.parquet_writer import BufferedParquetWriter
@@ -60,6 +61,7 @@ class WebSocketIngestionService:
         self.tokens = self.full_tokens + self.quote_tokens
         self._quotes = LatestQuoteTracker()
         self._last_quote_persist = 0.0
+        self._last_activity_sample: dict[int, float] = {}
 
         self._stop_event = threading.Event()
         self._connection_lost_event = threading.Event()
@@ -172,6 +174,40 @@ class WebSocketIngestionService:
             return
         try:
             self.store.upsert_latest_quotes(rows)
+            interval = float(getattr(self.settings.analytics, "sample_every_seconds", 60))
+            samples = []
+            for row in rows:
+                token = int(row["instrument_token"])
+                last = self._last_activity_sample.get(token, 0.0)
+                if not force and (now - last) < interval:
+                    continue
+                self._last_activity_sample[token] = now
+                samples.append(
+                    {
+                        "instrument_token": token,
+                        "symbol": row.get("symbol"),
+                        "timestamp": row.get("timestamp"),
+                        "last_price": row.get("last_price"),
+                        "last_quantity": row.get("last_quantity"),
+                        "volume": row.get("volume"),
+                        "volume_delta": row.get("volume_delta"),
+                        "oi": row.get("oi"),
+                        "oi_delta": row.get("oi_delta"),
+                        "trade_notional": trade_notional(
+                            row.get("last_price"), row.get("last_quantity")
+                        ),
+                        "bid_depth_5": row.get("bid_depth_5"),
+                        "ask_depth_5": row.get("ask_depth_5"),
+                        "spread": row.get("spread"),
+                        "depth_imbalance": row.get("depth_imbalance"),
+                        "tod_bucket": tod_bucket(
+                            row.get("timestamp"),
+                            int(getattr(self.settings.analytics, "tod_bucket_minutes", 15)),
+                        ),
+                    }
+                )
+            if samples:
+                self.store.insert_activity_samples(samples)
         except Exception:
             logger.exception("Failed to persist latest_quotes (%s instruments)", len(rows))
 

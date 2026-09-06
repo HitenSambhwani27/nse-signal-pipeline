@@ -9,8 +9,16 @@ from typing import Any
 from urllib.parse import unquote
 
 from nse_pipeline.config import Settings
-from nse_pipeline.market.cache_health import instrument_cache_health, lookup_instrument_meta
-from nse_pipeline.market.latest import public_quote
+from nse_pipeline.market.assemble import (
+    assemble_charts,
+    assemble_cross_market,
+    assemble_futures,
+    assemble_market_activity,
+    assemble_option_chain,
+    assemble_quote,
+    assemble_unusual,
+)
+from nse_pipeline.market.cache_health import instrument_cache_health
 from nse_pipeline.signals.maturity import (
     CLASS_FROM_TRACK,
     maturity_snapshot,
@@ -102,12 +110,138 @@ class SqliteUiReadModel:
 
     def quote(self, symbol: str) -> dict[str, Any]:
         wanted = unquote(symbol).strip()
-        row = self.store.fetch_latest_quote(wanted)
         cache = self._load_instrument_cache()
-        meta = lookup_instrument_meta(cache, wanted) if cache else None
-        if row is None:
+        dto = assemble_quote(self.store, cache, wanted)
+        if dto is None:
             return self._envelope(found=False, quote=None)
-        return self._envelope(found=True, quote=public_quote(row, meta=meta))
+        return self._envelope(found=True, quote=dto)
+
+    def option_chain(self, underlying: str, expiry: str | None = None) -> dict[str, Any]:
+        cache = self._require_cache()
+        if cache is None:
+            return self._envelope(found=False, chain=None, reason="cache_file_missing")
+        chain = assemble_option_chain(
+            self.settings, self.store, cache, unquote(underlying).strip(), expiry
+        )
+        return self._envelope(found=chain.get("found"), chain=chain)
+
+    def option_oi(self, underlying: str, expiry: str | None = None) -> dict[str, Any]:
+        payload = self.option_chain(underlying, expiry)
+        chain = payload.get("chain") or {}
+        return self._envelope(
+            found=payload.get("found"),
+            oi={
+                "underlying": chain.get("underlying"),
+                "expiry": chain.get("expiry"),
+                "atm": chain.get("atm"),
+                "pcr_oi": chain.get("pcr_oi"),
+                "pcr_volume": chain.get("pcr_volume"),
+                "pcr_near_atm_oi": chain.get("pcr_near_atm_oi"),
+                "total_ce_oi": chain.get("total_ce_oi"),
+                "total_pe_oi": chain.get("total_pe_oi"),
+                "highest_ce_oi": chain.get("highest_ce_oi"),
+                "highest_pe_oi": chain.get("highest_pe_oi"),
+                "largest_ce_oi_increase": chain.get("largest_ce_oi_increase"),
+                "largest_pe_oi_increase": chain.get("largest_pe_oi_increase"),
+                "largest_ce_oi_decrease": chain.get("largest_ce_oi_decrease"),
+                "largest_pe_oi_decrease": chain.get("largest_pe_oi_decrease"),
+                "max_pain": chain.get("max_pain"),
+                "chain_completeness": chain.get("chain_completeness"),
+                "chain_status": chain.get("chain_status"),
+                "eligible_contract_count": chain.get("eligible_contract_count"),
+                "selected_contract_count": chain.get("selected_contract_count"),
+                "missing_contract_count": chain.get("missing_contract_count"),
+                "truncated": chain.get("truncated"),
+                "multi_strike": chain.get("multi_strike"),
+            },
+        )
+
+    def option_activity(self, underlying: str, expiry: str | None = None) -> dict[str, Any]:
+        payload = self.option_chain(underlying, expiry)
+        chain = payload.get("chain") or {}
+        cache = self._load_instrument_cache()
+        rows = []
+        for strike in chain.get("strikes") or []:
+            for side in ("ce", "pe"):
+                block = strike.get(side) or {}
+                symbol = block.get("symbol")
+                if not symbol:
+                    continue
+                bundle = assemble_market_activity(self.settings, self.store, cache, symbol)
+                if bundle:
+                    rows.append(
+                        {
+                            "strike": strike.get("strike"),
+                            "side": side.upper(),
+                            "symbol": symbol,
+                            "unusual": bundle["unusual"],
+                            "volume_level": bundle["activity"].get("volume_level"),
+                            "large_trade": bundle["activity"].get("large_trade"),
+                        }
+                    )
+        return self._envelope(found=payload.get("found"), activity=rows, expiry=chain.get("expiry"))
+
+    def futures_book(self, underlying: str) -> dict[str, Any]:
+        cache = self._require_cache()
+        if cache is None:
+            return self._envelope(found=False, futures=None, reason="cache_file_missing")
+        book = assemble_futures(
+            self.settings, self.store, cache, unquote(underlying).strip()
+        )
+        return self._envelope(found=book.get("found"), futures=book)
+
+    def market_activity(self, symbol: str) -> dict[str, Any]:
+        cache = self._load_instrument_cache()
+        bundle = assemble_market_activity(
+            self.settings, self.store, cache, unquote(symbol).strip()
+        )
+        if bundle is None:
+            return self._envelope(found=False, activity=None)
+        return self._envelope(found=True, **bundle)
+
+    def unusual_activity(self, *, limit: int = 50) -> dict[str, Any]:
+        cache = self._load_instrument_cache()
+        rows = assemble_unusual(self.settings, self.store, cache, limit=limit)
+        return self._envelope(unusual_activity=rows)
+
+    def charts(self, symbol: str) -> dict[str, Any]:
+        series = assemble_charts(self.settings, self.store, unquote(symbol).strip())
+        return self._envelope(found=bool(series.get("points")), chart=series)
+
+    def watchlists(self) -> dict[str, Any]:
+        self.store.ensure_default_watchlist(
+            "default", list(self.settings.analytics.watchlist_default)
+        )
+        return self._envelope(watchlists=self.store.list_watchlists())
+
+    def watchlist_quotes(self) -> dict[str, Any]:
+        self.store.ensure_default_watchlist(
+            "default", list(self.settings.analytics.watchlist_default)
+        )
+        cache = self._load_instrument_cache()
+        lists = self.store.list_watchlists()
+        quotes = []
+        seen: set[str] = set()
+        for item in lists:
+            for symbol in item.get("symbols") or []:
+                if symbol in seen:
+                    continue
+                seen.add(symbol)
+                dto = assemble_quote(self.store, cache, symbol)
+                quotes.append({"symbol": symbol, "quote": dto, "found": dto is not None})
+        return self._envelope(quotes=quotes)
+
+    def cross_market(self, underlying: str) -> dict[str, Any]:
+        cache = self._require_cache()
+        if cache is None:
+            return self._envelope(found=False, cross_market=None, reason="cache_file_missing")
+        payload = assemble_cross_market(
+            self.settings, self.store, cache, unquote(underlying).strip()
+        )
+        return self._envelope(found=True, cross_market=payload)
+
+    def _require_cache(self) -> dict[str, Any] | None:
+        return self._load_instrument_cache()
 
     def _load_instrument_cache(self) -> dict[str, Any] | None:
         path = self.settings.paths.instruments_cache

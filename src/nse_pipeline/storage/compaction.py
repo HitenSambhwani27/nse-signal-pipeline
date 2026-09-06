@@ -18,6 +18,7 @@ import duckdb
 import pandas as pd
 
 from nse_pipeline.config import Settings
+from nse_pipeline.market.quality import dedupe_tick_dataframe
 
 
 logger = logging.getLogger(__name__)
@@ -49,9 +50,9 @@ def compact_symbol_day(
     """
     Merge all ticks_*.parquet in raw_symbol_dir into compacted_symbol_dir/ticks.parquet.
 
-    Rows are ordered by timestamp. Duplicate *files* from re-flush still appear
-    as extra observations if the same packet is written twice; this merge does
-    not invent unique trade IDs and does not drop same-price consecutive ticks.
+    Rows are ordered by timestamp. Consecutive exact-duplicate observations
+    (re-flush / minute-file rewrite artifacts) are collapsed in the compacted
+    output only. Raw minute files are not rewritten.
     """
     date_str = raw_symbol_dir.parent.name
     symbol = raw_symbol_dir.name
@@ -76,9 +77,9 @@ def compact_symbol_day(
 
     con = duckdb.connect(database=":memory:")
     try:
-        # Rows are ordered by timestamp. All observations are kept (union_by_name
-        # so additive tick columns survive). Re-flush of the same minute file
-        # concatenates; this is not a unique-trade filter.
+        # Rows are ordered by timestamp. Additive tick columns survive via
+        # union_by_name. Consecutive identical re-flush rows are collapsed
+        # after the merge; this is not a session-wide unique-trade filter.
         con.execute(
             f"""
             COPY (
@@ -91,6 +92,12 @@ def compact_symbol_day(
         row_count = int(con.execute(f"SELECT COUNT(*) FROM read_parquet('{out_sql}')").fetchone()[0])
     finally:
         con.close()
+
+    compacted = pd.read_parquet(out_path)
+    deduped = dedupe_tick_dataframe(compacted)
+    if len(deduped) < len(compacted):
+        deduped.to_parquet(out_path, index=False)
+        row_count = int(len(deduped))
 
     archived = False
     if archive_minute_files:

@@ -26,8 +26,9 @@ index_symbols:
   - "NIFTY 50"
   - "NIFTY BANK"
 
-# Index options only (Nifty weekly + Bank Nifty monthly). No equity options.
-# Nifty monthly options are out of scope — see TRADE_OFFS.md.
+# Index options only by default for Nifty weekly + Bank Nifty monthly.
+# Nifty monthly options stay out of the training panel (TRADE_OFFS.md).
+# expiry_count is configurable; 1 = current expiry only.
 options:
   exchange: NFO
   underlyings:
@@ -35,14 +36,16 @@ options:
       spot_quote: "NSE:NIFTY 50"
       strikes_each_side: 10
       strike_interval: 50
-      # weekly = Tuesday series only; never pool with monthly Nifty.
       series: weekly
+      expiry_count: 1
+      subscribe_mode: full
     - name: BANKNIFTY
       spot_quote: "NSE:NIFTY BANK"
       strikes_each_side: 10
       strike_interval: 100
-      # Bank Nifty weekly discontinued Nov 2024; monthly is its only series.
       series: monthly
+      expiry_count: 1
+      subscribe_mode: full
 
 # Index futures: near + next month for each underlying.
 futures:
@@ -52,6 +55,52 @@ futures:
     - BANKNIFTY
   contract_count: 2  # near + next
   subscribe_mode: full
+
+# NIFTY100 ∩ currently listed F&O. Caps prevent subscribing every strike.
+# Becomes live only on the next planned ingest restart (not this task).
+stock_derivatives:
+  enabled: true
+  futures_enabled: true
+  options_enabled: true
+  futures_contract_count: 1
+  futures_subscribe_mode: full
+  options_strikes_each_side: 5
+  options_expiry_count: 1
+  # ATM CE/PE are always FULL so OI/depth/exchange timestamps exist.
+  # options_subscribe_mode applies to extra wing strikes only.
+  options_atm_subscribe_mode: full
+  options_subscribe_mode: full
+  max_stock_option_contracts: 600
+  max_total_tokens: 2500
+
+analytics:
+  atm_method: nearest_listed
+  pcr_atm_strikes: 5
+  max_pain_min_strikes: 11
+  max_pain_min_completeness: 0.70
+  large_trade_percentile: 95.0
+  very_large_trade_percentile: 99.0
+  extreme_trade_percentile: 99.9
+  volume_elevated_ratio: 2.0
+  volume_burst_ratio: 3.0
+  volume_extreme_ratio: 5.0
+  activity_elevated_ratio: 2.0
+  activity_burst_ratio: 3.0
+  aggressor_tolerance_bps: 2.0
+  depth_shock_pct: 40.0
+  spread_widen_pct: 50.0
+  baseline_min_observations: 30
+  tod_bucket_minutes: 15
+  chart_max_points: 500
+  unusual_high_score: 70.0
+  sample_every_seconds: 60
+  futures_basis_max_age_seconds: 10
+  watchlist_default:
+    - "NIFTY 50"
+    - "NIFTY BANK"
+    - RELIANCE
+    - HDFCBANK
+    - INFY
 
 # Ingestion: how often to flush buffered ticks to Parquet.
 ingestion:

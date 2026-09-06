@@ -273,9 +273,47 @@ CREATE TABLE IF NOT EXISTS latest_quotes (
     volume_delta INTEGER,
     oi_delta INTEGER,
     price_delta REAL,
+    ohlc_open REAL,
+    ohlc_high REAL,
+    ohlc_low REAL,
+    ohlc_close REAL,
+    last_trade_time TEXT,
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_latest_quotes_symbol ON latest_quotes(symbol);
+
+CREATE TABLE IF NOT EXISTS activity_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instrument_token INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    last_price REAL,
+    last_quantity INTEGER,
+    volume INTEGER,
+    volume_delta INTEGER,
+    oi INTEGER,
+    oi_delta INTEGER,
+    trade_notional REAL,
+    bid_depth_5 INTEGER,
+    ask_depth_5 INTEGER,
+    spread REAL,
+    depth_imbalance REAL,
+    tod_bucket TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_activity_samples_symbol_ts
+    ON activity_samples(symbol, timestamp);
+
+CREATE TABLE IF NOT EXISTS watchlists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS watchlist_symbols (
+    watchlist_id INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    PRIMARY KEY (watchlist_id, symbol),
+    FOREIGN KEY (watchlist_id) REFERENCES watchlists(id)
+);
 """
 
 
@@ -334,6 +372,19 @@ class SQLiteStore:
                 "CREATE INDEX IF NOT EXISTS idx_ingestion_meta_event_ts "
                 "ON ingestion_meta(event_type, timestamp)"
             )
+            lq_cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(latest_quotes)").fetchall()
+            }
+            for col, sql in (
+                ("ohlc_open", "ALTER TABLE latest_quotes ADD COLUMN ohlc_open REAL"),
+                ("ohlc_high", "ALTER TABLE latest_quotes ADD COLUMN ohlc_high REAL"),
+                ("ohlc_low", "ALTER TABLE latest_quotes ADD COLUMN ohlc_low REAL"),
+                ("ohlc_close", "ALTER TABLE latest_quotes ADD COLUMN ohlc_close REAL"),
+                ("last_trade_time", "ALTER TABLE latest_quotes ADD COLUMN last_trade_time TEXT"),
+            ):
+                if col not in lq_cols:
+                    conn.execute(sql)
 
     @contextmanager
     def connection(self) -> Generator[sqlite3.Connection, None, None]:
@@ -828,9 +879,11 @@ class SQLiteStore:
                     best_bid_price, best_bid_quantity,
                     best_ask_price, best_ask_quantity,
                     bid_depth_5, ask_depth_5, spread, mid_price, depth_imbalance,
-                    volume_delta, oi_delta, price_delta, updated_at
+                    volume_delta, oi_delta, price_delta,
+                    ohlc_open, ohlc_high, ohlc_low, ohlc_close, last_trade_time,
+                    updated_at
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 ON CONFLICT(instrument_token) DO UPDATE SET
                     symbol=excluded.symbol,
@@ -856,6 +909,11 @@ class SQLiteStore:
                     volume_delta=excluded.volume_delta,
                     oi_delta=excluded.oi_delta,
                     price_delta=excluded.price_delta,
+                    ohlc_open=excluded.ohlc_open,
+                    ohlc_high=excluded.ohlc_high,
+                    ohlc_low=excluded.ohlc_low,
+                    ohlc_close=excluded.ohlc_close,
+                    last_trade_time=excluded.last_trade_time,
                     updated_at=excluded.updated_at
                 """,
                 [
@@ -884,6 +942,11 @@ class SQLiteStore:
                         r.get("volume_delta"),
                         r.get("oi_delta"),
                         r.get("price_delta"),
+                        r.get("ohlc_open"),
+                        r.get("ohlc_high"),
+                        r.get("ohlc_low"),
+                        r.get("ohlc_close"),
+                        r.get("last_trade_time"),
                         now,
                     )
                     for r in payload
@@ -903,6 +966,109 @@ class SQLiteStore:
                 (wanted,),
             ).fetchone()
         return dict(row) if row else None
+
+    def fetch_latest_quotes_map(self) -> dict[str, dict[str, Any]]:
+        with self.connection() as conn:
+            rows = conn.execute("SELECT * FROM latest_quotes").fetchall()
+        return {str(dict(r)["symbol"]): dict(r) for r in rows}
+
+    def insert_activity_samples(self, rows: Iterable[dict[str, Any]]) -> int:
+        payload = list(rows)
+        if not payload:
+            return 0
+        with self.connection() as conn:
+            conn.executemany(
+                """
+                INSERT INTO activity_samples (
+                    instrument_token, symbol, timestamp, last_price, last_quantity,
+                    volume, volume_delta, oi, oi_delta, trade_notional,
+                    bid_depth_5, ask_depth_5, spread, depth_imbalance, tod_bucket
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        r.get("instrument_token"),
+                        r.get("symbol"),
+                        r.get("timestamp"),
+                        r.get("last_price"),
+                        r.get("last_quantity"),
+                        r.get("volume"),
+                        r.get("volume_delta"),
+                        r.get("oi"),
+                        r.get("oi_delta"),
+                        r.get("trade_notional"),
+                        r.get("bid_depth_5"),
+                        r.get("ask_depth_5"),
+                        r.get("spread"),
+                        r.get("depth_imbalance"),
+                        r.get("tod_bucket"),
+                    )
+                    for r in payload
+                ],
+            )
+        return len(payload)
+
+    def fetch_activity_samples(self, symbol: str, *, limit: int = 2000) -> list[dict[str, Any]]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM activity_samples
+                WHERE symbol = ? COLLATE NOCASE
+                ORDER BY timestamp
+                LIMIT ?
+                """,
+                (symbol.strip(), limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def fetch_activity_baseline(
+        self, symbol: str, *, tod_bucket: str | None, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        sql = """
+            SELECT * FROM activity_samples
+            WHERE symbol = ? COLLATE NOCASE
+        """
+        params: list[Any] = [symbol.strip()]
+        if tod_bucket:
+            sql += " AND tod_bucket = ?"
+            params.append(tod_bucket)
+        sql += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+        with self.connection() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_watchlists(self) -> list[dict[str, Any]]:
+        with self.connection() as conn:
+            lists = conn.execute("SELECT id, name, created_at FROM watchlists ORDER BY id").fetchall()
+            out = []
+            for item in lists:
+                row = dict(item)
+                symbols = conn.execute(
+                    "SELECT symbol FROM watchlist_symbols WHERE watchlist_id = ? ORDER BY symbol",
+                    (row["id"],),
+                ).fetchall()
+                row["symbols"] = [str(s[0]) for s in symbols]
+                out.append(row)
+        return out
+
+    def ensure_default_watchlist(self, name: str, symbols: list[str]) -> None:
+        with self.connection() as conn:
+            existing = conn.execute(
+                "SELECT id FROM watchlists WHERE name = ?", (name,)
+            ).fetchone()
+            if existing:
+                return
+            now = datetime.now(timezone.utc).isoformat()
+            cur = conn.execute(
+                "INSERT INTO watchlists (name, created_at) VALUES (?, ?)",
+                (name, now),
+            )
+            wid = int(cur.lastrowid)
+            conn.executemany(
+                "INSERT OR IGNORE INTO watchlist_symbols (watchlist_id, symbol) VALUES (?, ?)",
+                [(wid, s) for s in symbols],
+            )
 
     def count_feature_logs_by_source(self, start: str, end: str) -> dict[str, int]:
         """Retrain composition — GROUP BY only, never fetch features_json."""

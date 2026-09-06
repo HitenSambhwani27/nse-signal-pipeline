@@ -54,6 +54,7 @@ def snapshot_from_tick(
     price_delta = numeric_delta(tick.last_price, prev.get("last_price"))
     ts = tick.timestamp
     ingested = tick.ingested_at or datetime.now(timezone.utc)
+    ltt = tick.last_trade_time
     return {
         "instrument_token": tick.instrument_token,
         "symbol": tick.symbol,
@@ -79,6 +80,11 @@ def snapshot_from_tick(
         "volume_delta": int(volume_delta) if volume_delta is not None else None,
         "oi_delta": int(oi_delta) if oi_delta is not None else None,
         "price_delta": price_delta,
+        "ohlc_open": tick.ohlc_open,
+        "ohlc_high": tick.ohlc_high,
+        "ohlc_low": tick.ohlc_low,
+        "ohlc_close": tick.ohlc_close,
+        "last_trade_time": ltt.isoformat() if ltt is not None and hasattr(ltt, "isoformat") else (str(ltt) if ltt else None),
     }
 
 
