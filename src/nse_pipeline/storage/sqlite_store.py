@@ -967,6 +967,13 @@ class SQLiteStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def latest_quote_max_timestamp(self) -> str | None:
+        """Newest observation timestamp in latest_quotes, without loading rows."""
+        with self.connection() as conn:
+            row = conn.execute("SELECT max(timestamp) FROM latest_quotes").fetchone()
+        value = None if row is None else row[0]
+        return str(value) if value else None
+
     def fetch_latest_quotes_map(self) -> dict[str, dict[str, Any]]:
         with self.connection() as conn:
             rows = conn.execute("SELECT * FROM latest_quotes").fetchall()

@@ -16,6 +16,37 @@ import pandas as pd
 from nse_pipeline.config import Settings
 from nse_pipeline.market.quality import dedupe_tick_dataframe
 
+# Columns needed to rebuild a latest_quotes-shaped snapshot from compacted
+# ticks. Missing columns are dropped rather than faked.
+LAST_ROW_COLUMNS = (
+    "timestamp",
+    "instrument_token",
+    "symbol",
+    "exchange",
+    "last_price",
+    "last_quantity",
+    "volume",
+    "average_price",
+    "oi",
+    "total_buy_quantity",
+    "total_sell_quantity",
+    "ohlc_open",
+    "ohlc_high",
+    "ohlc_low",
+    "ohlc_close",
+    "last_trade_time",
+    "ingested_at",
+    "bid_prices",
+    "bid_quantities",
+    "ask_prices",
+    "ask_quantities",
+)
+# Nested book arrays. Expensive on a day-wide scan; only needed when the
+# caller will compute depth/aggressor metrics from the raw ticks.
+LAST_ROW_DEPTH_COLUMNS = frozenset(
+    ("bid_prices", "bid_quantities", "ask_prices", "ask_quantities")
+)
+
 
 class DuckDBTickStore:
     """
@@ -224,6 +255,92 @@ class DuckDBTickStore:
             if limit is not None and len(found) >= int(limit):
                 break
         return list(reversed(found))
+
+    def latest_session_date(self) -> str | None:
+        """Newest compacted date that holds completed-session data."""
+        for date_str in reversed(self.list_compacted_dates()):
+            if self.list_symbols(date_str):
+                return date_str
+        return None
+
+    def _available_columns(self, paths: list[Path]) -> set[str]:
+        try:
+            described = self.query(
+                f"DESCRIBE SELECT * FROM read_parquet({self._sql_paths(paths)}, union_by_name=true)"
+            )
+        except Exception:
+            return set()
+        if described.empty:
+            return set()
+        column = "column_name" if "column_name" in described.columns else described.columns[0]
+        return {str(name) for name in described[column].tolist()}
+
+    def read_last_rows(
+        self,
+        date_str: str,
+        symbols: list[str] | None = None,
+        *,
+        per_symbol: int = 2,
+        include_depth: bool = True,
+    ) -> pd.DataFrame:
+        """Newest `per_symbol` compacted tick rows per symbol on one date.
+
+        Two rows are enough to derive the same volume/OI/price deltas the live
+        snapshot carries. Timestamps are compared as text to avoid DuckDB
+        timezone handling on aggregates (see tick_time_span).
+        """
+        if symbols is None:
+            names = self.list_tick_symbols(date_str)
+        else:
+            names = []
+            for symbol in symbols:
+                try:
+                    names.append(self._safe_symbol(symbol))
+                except ValueError:
+                    continue
+        paths = [self._ticks_path(date_str, name) for name in names]
+        paths = [path for path in paths if path.is_file()]
+        if not paths:
+            return pd.DataFrame()
+        available = self._available_columns(paths)
+        wanted = [
+            column
+            for column in LAST_ROW_COLUMNS
+            if column in available and (include_depth or column not in LAST_ROW_DEPTH_COLUMNS)
+        ]
+        if "symbol" not in wanted or "timestamp" not in wanted:
+            return pd.DataFrame()
+        projection = ", ".join(f'"{column}"' for column in wanted)
+        sql = f"""
+            SELECT {projection} FROM (
+                SELECT {projection},
+                       row_number() OVER (
+                           PARTITION BY "symbol"
+                           ORDER BY CAST("timestamp" AS VARCHAR) DESC
+                       ) AS _rank
+                FROM read_parquet({self._sql_paths(paths)}, union_by_name=true)
+            )
+            WHERE _rank <= {max(1, int(per_symbol))}
+            ORDER BY "symbol", CAST("timestamp" AS VARCHAR) DESC
+        """
+        try:
+            return self.query(sql)
+        except Exception:
+            return pd.DataFrame()
+
+    def read_daily_row(self, symbol: str, date_str: str) -> dict[str, Any] | None:
+        """Completed-session daily bar for one symbol, when no ticks exist."""
+        try:
+            wanted = self._safe_symbol(symbol)
+        except ValueError:
+            return None
+        path = self._daily_path(date_str, wanted)
+        if not path.is_file():
+            return None
+        frame = self._read_paths([path])
+        if frame.empty:
+            return None
+        return frame.iloc[-1].to_dict()
 
     def read_symbol_observations(
         self, symbol: str, dates: list[str]

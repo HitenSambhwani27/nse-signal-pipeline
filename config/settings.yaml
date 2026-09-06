@@ -98,6 +98,13 @@ analytics:
   unusual_high_score: 70.0
   sample_every_seconds: 60
   futures_basis_max_age_seconds: 10
+  # A latest_quotes row older than this is not treated as live; the read layer
+  # serves the latest completed session instead (data_status=last_session).
+  live_quote_max_age_seconds: 120
+  last_session_cache_ttl_seconds: 120
+  # Unusual-activity last-session ranking only. Live path still uses latest_quotes.
+  unusual_historical_max_candidates: 100
+  unusual_historical_candidate_multiplier: 2
   watchlist_default:
     - "NIFTY 50"
     - "NIFTY BANK"

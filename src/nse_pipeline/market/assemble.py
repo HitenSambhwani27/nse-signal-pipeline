@@ -19,9 +19,26 @@ from nse_pipeline.market.flow import (
 from nse_pipeline.market.futures_analytics import futures_snapshot
 from nse_pipeline.market.options_analytics import build_option_chain
 from nse_pipeline.market.quotes import enrich_quote
+from nse_pipeline.market.read_policy import MarketDataPolicy, SymbolSnapshot
+from nse_pipeline.market.data_state import resolve
 from nse_pipeline.market.universe import INDEX_SPOT_BY_NAME, infer_strike_interval
 from nse_pipeline.market.unusual import unusual_activity_score
 from nse_pipeline.storage.sqlite_store import SQLiteStore
+
+
+def _policy(
+    settings: Settings, store: SQLiteStore, policy: MarketDataPolicy | None
+) -> MarketDataPolicy:
+    """Reuse the read model's policy; build a transient one for direct calls."""
+    return policy if policy is not None else MarketDataPolicy(settings, store)
+
+
+def _rows(snapshots: dict[str, SymbolSnapshot]) -> dict[str, dict[str, Any]]:
+    return {name: snap.row for name, snap in snapshots.items() if snap.row is not None}
+
+
+def _blank(symbol: str, policy: MarketDataPolicy) -> SymbolSnapshot:
+    return SymbolSnapshot(symbol, None, None, policy.no_data(reason="symbol_not_requested"))
 
 
 def _chain_selection_counts(
@@ -99,13 +116,18 @@ def _future_contracts(cache: dict[str, Any], underlying: str) -> list[dict[str, 
 
 
 def assemble_quote(
-    store: SQLiteStore, cache: dict[str, Any] | None, symbol: str
+    settings: Settings,
+    store: SQLiteStore,
+    cache: dict[str, Any] | None,
+    symbol: str,
+    *,
+    policy: MarketDataPolicy | None = None,
 ) -> dict[str, Any] | None:
-    row = store.fetch_latest_quote(symbol)
-    if row is None:
+    snap = _policy(settings, store, policy).snapshot(symbol)
+    if snap.row is None:
         return None
     meta = lookup_instrument_meta(cache or {}, symbol)
-    return enrich_quote(row, meta=meta)
+    return snap.attach(enrich_quote(snap.row, meta=meta))
 
 
 def assemble_option_chain(
@@ -114,13 +136,20 @@ def assemble_option_chain(
     cache: dict[str, Any],
     underlying: str,
     expiry: str | None,
+    *,
+    policy: MarketDataPolicy | None = None,
 ) -> dict[str, Any]:
+    read = _policy(settings, store, policy)
     expiries = _expiries_for(cache, underlying)
     chosen = (expiry or "").strip()[:10] or (expiries[0] if expiries else "")
     contracts = _option_contracts(cache, underlying, chosen) if chosen else []
-    quotes = store.fetch_latest_quotes_map()
     spot_sym = INDEX_SPOT_BY_NAME.get(underlying.upper(), underlying.upper())
-    spot_row = store.fetch_latest_quote(spot_sym)
+    # One coherent read: spot and every selected contract resolve together.
+    wanted = [spot_sym] + [str(c.get("tradingsymbol")) for c in contracts]
+    snapshots = read.snapshots(wanted)
+    quotes = _rows(snapshots)
+    spot_snap = snapshots.get(spot_sym) or _blank(spot_sym, read)
+    spot_row = spot_snap.row
     spot = None if spot_row is None else spot_row.get("last_price")
     interval = None
     cfg = _cfg(settings)
@@ -154,6 +183,9 @@ def assemble_option_chain(
     )
     chain["available_expiries"] = expiries
     chain["found"] = bool(contracts)
+    chain["data_state"] = read.merged_state(
+        [snapshots[name] for name in wanted if name in snapshots]
+    ).to_dict()
     return chain
 
 
@@ -162,23 +194,33 @@ def assemble_futures(
     store: SQLiteStore,
     cache: dict[str, Any],
     underlying: str,
+    *,
+    policy: MarketDataPolicy | None = None,
 ) -> dict[str, Any]:
+    read = _policy(settings, store, policy)
     contracts = _future_contracts(cache, underlying)
     spot_sym = INDEX_SPOT_BY_NAME.get(underlying.upper(), underlying.upper())
-    spot_row = store.fetch_latest_quote(spot_sym)
+    # Spot and futures resolve in one read so basis compares the same session.
+    wanted = [spot_sym] + [str(c.get("tradingsymbol")) for c in contracts]
+    snapshots = read.snapshots(wanted)
+    spot_snap = snapshots.get(spot_sym) or _blank(spot_sym, read)
+    spot_row = spot_snap.row
     spot = None if spot_row is None else spot_row.get("last_price")
     spot_as_of = None if spot_row is None else spot_row.get("timestamp")
     items = []
     for meta in contracts:
-        quote = store.fetch_latest_quote(str(meta.get("tradingsymbol")))
+        name = str(meta.get("tradingsymbol"))
+        snap = snapshots.get(name) or _blank(name, read)
         items.append(
-            futures_snapshot(
-                quote,
-                meta=meta,
-                spot=None if spot is None else float(spot),
-                spot_as_of=spot_as_of,
-                spot_symbol=spot_sym,
-                max_age_seconds=_cfg(settings).futures_basis_max_age_seconds,
+            snap.attach(
+                futures_snapshot(
+                    snap.row,
+                    meta=meta,
+                    spot=None if spot is None else float(spot),
+                    spot_as_of=spot_as_of,
+                    spot_symbol=spot_sym,
+                    max_age_seconds=_cfg(settings).futures_basis_max_age_seconds,
+                )
             )
         )
     return {
@@ -189,6 +231,9 @@ def assemble_futures(
         "contracts": items,
         "found": bool(contracts),
         "kind": "derived",
+        "data_state": read.merged_state(
+            [snapshots[name] for name in wanted if name in snapshots]
+        ).to_dict(),
     }
 
 
@@ -197,8 +242,10 @@ def _activity_bundle(
     store: SQLiteStore,
     cache: dict[str, Any] | None,
     symbol: str,
+    *,
+    snapshot: SymbolSnapshot,
 ) -> dict[str, Any] | None:
-    quote = store.fetch_latest_quote(symbol)
+    quote = snapshot.row
     if quote is None:
         return None
     meta = lookup_instrument_meta(cache or {}, symbol) or {}
@@ -213,7 +260,9 @@ def _activity_bundle(
     baseline_vol = (sum(vol_deltas) / len(vol_deltas)) if vol_deltas else None
     activity_rate = 1.0 if quote.get("last_quantity") else None
     baseline_act = (len(samples) / max(len(vol_deltas), 1)) if samples else None
-    prev = samples[1] if len(samples) > 1 else None
+    # Live baselines come from activity_samples; a last-session snapshot
+    # compares against the preceding observation of that same session.
+    prev = snapshot.previous or (samples[1] if len(samples) > 1 else None)
     activity = market_activity_row(
         quote,
         lot_size=meta.get("lot_size"),
@@ -264,22 +313,52 @@ def _activity_bundle(
         "price_impact": impact,
         "unusual": unusual,
         "quote": enrich_quote(quote, meta=meta),
+        "data_state": snapshot.state.to_dict(),
     }
 
 
 def assemble_market_activity(
-    settings: Settings, store: SQLiteStore, cache: dict[str, Any] | None, symbol: str
+    settings: Settings,
+    store: SQLiteStore,
+    cache: dict[str, Any] | None,
+    symbol: str,
+    *,
+    policy: MarketDataPolicy | None = None,
 ) -> dict[str, Any] | None:
-    return _activity_bundle(settings, store, cache, symbol)
+    read = _policy(settings, store, policy)
+    return _activity_bundle(
+        settings, store, cache, symbol, snapshot=read.snapshot(symbol)
+    )
+
+
+# Live unusual-activity still ranks up to this many latest_quotes rows.
+UNUSUAL_LIVE_CANDIDATE_LIMIT = 500
+
+
+def _unusual_historical_candidate_limit(settings: Settings, limit: int) -> int:
+    """Bound the last-session Parquet scan. Live ranking does not use this."""
+    cfg = _cfg(settings)
+    requested = max(int(limit), 1)
+    multiplied = requested * max(int(cfg.unusual_historical_candidate_multiplier), 1)
+    return max(1, min(int(cfg.unusual_historical_max_candidates), multiplied))
 
 
 def assemble_unusual(
-    settings: Settings, store: SQLiteStore, cache: dict[str, Any] | None, *, limit: int = 50
+    settings: Settings,
+    store: SQLiteStore,
+    cache: dict[str, Any] | None,
+    *,
+    limit: int = 50,
+    policy: MarketDataPolicy | None = None,
 ) -> list[dict[str, Any]]:
-    quotes = store.fetch_latest_quotes_map()
+    read = _policy(settings, store, policy)
+    snapshots = read.all_snapshots(
+        limit=UNUSUAL_LIVE_CANDIDATE_LIMIT,
+        historical_limit=_unusual_historical_candidate_limit(settings, limit),
+    )
     ranked = []
-    for symbol in list(quotes)[:500]:
-        bundle = _activity_bundle(settings, store, cache, symbol)
+    for symbol, snap in snapshots.items():
+        bundle = _activity_bundle(settings, store, cache, symbol, snapshot=snap)
         if not bundle:
             continue
         score = bundle["unusual"]["activity_score"]
@@ -291,6 +370,7 @@ def assemble_unusual(
                 **bundle["unusual"],
                 "liquidity_events": bundle["liquidity_events"],
                 "aggressive_proxy": bundle["aggressive_proxy"]["label"],
+                "data_state": snap.state.to_dict(),
             }
         )
     ranked.sort(key=lambda r: r["activity_score"], reverse=True)
@@ -303,6 +383,7 @@ def assemble_charts(
     symbol: str,
     *,
     interval: str | None = None,
+    policy: MarketDataPolicy | None = None,
 ) -> dict[str, Any]:
     cfg = _cfg(settings)
     samples = store.fetch_activity_samples(symbol, limit=5000)
@@ -329,17 +410,31 @@ def assemble_charts(
     if samples:
         sources.append("activity_samples")
     payload["source"] = "+".join(sources) if sources else None
+    # activity_samples is the live path; compacted Parquet is the historical one.
+    _choice, state = resolve(
+        session=settings.session,
+        live_timestamp=samples[-1].get("timestamp") if samples else None,
+        historical_timestamp=historical[-1].get("timestamp") if historical else None,
+        historical_source=hist_source,
+        max_age_seconds=cfg.live_quote_max_age_seconds,
+    )
+    payload["data_state"] = state.to_dict()
     return payload
 
 
 def assemble_cross_market(
-    settings: Settings, store: SQLiteStore, cache: dict[str, Any], underlying: str
+    settings: Settings,
+    store: SQLiteStore,
+    cache: dict[str, Any],
+    underlying: str,
+    *,
+    policy: MarketDataPolicy | None = None,
 ) -> dict[str, Any]:
-    fut = assemble_futures(settings, store, cache, underlying)
-    opt = assemble_option_chain(settings, store, cache, underlying, None)
-    spot_row = store.fetch_latest_quote(
-        INDEX_SPOT_BY_NAME.get(underlying.upper(), underlying.upper())
-    )
+    read = _policy(settings, store, policy)
+    fut = assemble_futures(settings, store, cache, underlying, policy=read)
+    opt = assemble_option_chain(settings, store, cache, underlying, None, policy=read)
+    spot_sym = INDEX_SPOT_BY_NAME.get(underlying.upper(), underlying.upper())
+    spot_row = read.snapshot(spot_sym).row
     near = fut["contracts"][0] if fut["contracts"] else {}
     notes = describe_cross_market(
         spot_change=None if spot_row is None else spot_row.get("price_delta"),
@@ -360,6 +455,7 @@ def assemble_cross_market(
         "relationships": notes,
         "kind": "inferred",
         "note": "Descriptive relationships, not prediction probabilities.",
+        "data_state": fut.get("data_state"),
         "futures": fut,
         "options_summary": {
             "expiry": opt.get("expiry"),

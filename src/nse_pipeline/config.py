@@ -139,6 +139,15 @@ class MarketAnalyticsSettings:
     unusual_high_score: float = 70.0
     sample_every_seconds: int = 60
     futures_basis_max_age_seconds: float = 10.0
+    # Above this age a latest_quotes row is no longer "live"; the read layer
+    # falls back to the latest completed session instead.
+    live_quote_max_age_seconds: float = 120.0
+    last_session_cache_ttl_seconds: float = 120.0
+    # Unusual-activity historical ranking only. Live ranking still scans
+    # latest_quotes (up to 500). Default 100 is 2x the API's limit=50 so
+    # score<=0 filtering still has headroom without a 589-file Parquet scan.
+    unusual_historical_max_candidates: int = 100
+    unusual_historical_candidate_multiplier: int = 2
     watchlist_default: list[str] = field(
         default_factory=lambda: ["NIFTY 50", "NIFTY BANK", "RELIANCE", "HDFCBANK", "INFY"]
     )
@@ -626,6 +635,18 @@ def load_settings(config_path: Path | None = None) -> Settings:
         sample_every_seconds=int(an_cfg.get("sample_every_seconds", 60)),
         futures_basis_max_age_seconds=float(
             an_cfg.get("futures_basis_max_age_seconds", 10.0)
+        ),
+        live_quote_max_age_seconds=float(
+            an_cfg.get("live_quote_max_age_seconds", 120.0)
+        ),
+        last_session_cache_ttl_seconds=float(
+            an_cfg.get("last_session_cache_ttl_seconds", 120.0)
+        ),
+        unusual_historical_max_candidates=int(
+            an_cfg.get("unusual_historical_max_candidates", 100)
+        ),
+        unusual_historical_candidate_multiplier=int(
+            an_cfg.get("unusual_historical_candidate_multiplier", 2)
         ),
         watchlist_default=[
             str(x)

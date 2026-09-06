@@ -19,6 +19,7 @@ from nse_pipeline.market.assemble import (
     assemble_unusual,
 )
 from nse_pipeline.market.cache_health import instrument_cache_health
+from nse_pipeline.market.read_policy import MarketDataPolicy
 from nse_pipeline.signals.maturity import (
     CLASS_FROM_TRACK,
     maturity_snapshot,
@@ -51,6 +52,8 @@ class SqliteUiReadModel:
     def __init__(self, settings: Settings, *, cache_ttl_s: float = MATURITY_CACHE_TTL_S) -> None:
         self.settings = settings
         self.store = SQLiteStore(settings.paths.sqlite_db)
+        # One policy per read model: decides live vs latest completed session.
+        self.policy = MarketDataPolicy(settings, self.store)
         self._cache_ttl_s = cache_ttl_s
         self._cached: dict[str, Any] | None = None
         self._cached_at = 0.0
@@ -66,7 +69,16 @@ class SqliteUiReadModel:
         return self._cached
 
     def _envelope(self, **payload: Any) -> dict[str, Any]:
+        """`as_of` stays the response time; `data_state.as_of` is the data time."""
         return {"maturity": self._maturity(), "as_of": _as_of(), **payload}
+
+    def _state_of(self, payload: dict[str, Any] | None, symbol: str | None = None) -> dict[str, Any]:
+        state = (payload or {}).get("data_state")
+        if state:
+            return state
+        if symbol is not None:
+            return self.policy.snapshot(symbol).state.to_dict()
+        return self.policy.no_data(reason="no_live_or_historical_observation").to_dict()
 
     def overview(self) -> dict[str, Any]:
         health = self.store.pipeline_health()
@@ -76,6 +88,7 @@ class SqliteUiReadModel:
             last_signal=health.get("last_live_signal_trade_date"),
             processing_status=health.get("processing_status"),
             signal_counts=self.store.signal_counts(),
+            data_state=self.policy.overall_state().to_dict(),
         )
 
     def maturity(self) -> dict[str, Any]:
@@ -106,30 +119,44 @@ class SqliteUiReadModel:
         blob.setdefault("database", "ok")
         blob.setdefault("processing_lag", "unknown")
         blob["instrument_cache"] = self._instrument_cache_health()
-        return self._envelope(health=blob)
+        return self._envelope(health=blob, data_state=self.policy.overall_state().to_dict())
 
     def quote(self, symbol: str) -> dict[str, Any]:
         wanted = unquote(symbol).strip()
         cache = self._load_instrument_cache()
-        dto = assemble_quote(self.store, cache, wanted)
+        dto = assemble_quote(self.settings, self.store, cache, wanted, policy=self.policy)
+        state = self._state_of(dto, wanted)
         if dto is None:
-            return self._envelope(found=False, quote=None)
-        return self._envelope(found=True, quote=dto)
+            return self._envelope(found=False, quote=None, data_state=state)
+        return self._envelope(found=True, quote=dto, data_state=state)
 
     def option_chain(self, underlying: str, expiry: str | None = None) -> dict[str, Any]:
         cache = self._require_cache()
         if cache is None:
-            return self._envelope(found=False, chain=None, reason="cache_file_missing")
+            return self._envelope(
+                found=False,
+                chain=None,
+                reason="cache_file_missing",
+                data_state=self.policy.no_data(reason="cache_file_missing").to_dict(),
+            )
         chain = assemble_option_chain(
-            self.settings, self.store, cache, unquote(underlying).strip(), expiry
+            self.settings,
+            self.store,
+            cache,
+            unquote(underlying).strip(),
+            expiry,
+            policy=self.policy,
         )
-        return self._envelope(found=chain.get("found"), chain=chain)
+        return self._envelope(
+            found=chain.get("found"), chain=chain, data_state=self._state_of(chain)
+        )
 
     def option_oi(self, underlying: str, expiry: str | None = None) -> dict[str, Any]:
         payload = self.option_chain(underlying, expiry)
         chain = payload.get("chain") or {}
         return self._envelope(
             found=payload.get("found"),
+            data_state=payload.get("data_state"),
             oi={
                 "underlying": chain.get("underlying"),
                 "expiry": chain.get("expiry"),
@@ -170,7 +197,9 @@ class SqliteUiReadModel:
                 symbol = block.get("symbol")
                 if not symbol:
                     continue
-                bundle = assemble_market_activity(self.settings, self.store, cache, symbol)
+                bundle = assemble_market_activity(
+                    self.settings, self.store, cache, symbol, policy=self.policy
+                )
                 if bundle:
                     rows.append(
                         {
@@ -180,39 +209,65 @@ class SqliteUiReadModel:
                             "unusual": bundle["unusual"],
                             "volume_level": bundle["activity"].get("volume_level"),
                             "large_trade": bundle["activity"].get("large_trade"),
+                            "data_state": bundle.get("data_state"),
                         }
                     )
-        return self._envelope(found=payload.get("found"), activity=rows, expiry=chain.get("expiry"))
+        return self._envelope(
+            found=payload.get("found"),
+            activity=rows,
+            expiry=chain.get("expiry"),
+            data_state=payload.get("data_state"),
+        )
 
     def futures_book(self, underlying: str) -> dict[str, Any]:
         cache = self._require_cache()
         if cache is None:
-            return self._envelope(found=False, futures=None, reason="cache_file_missing")
+            return self._envelope(
+                found=False,
+                futures=None,
+                reason="cache_file_missing",
+                data_state=self.policy.no_data(reason="cache_file_missing").to_dict(),
+            )
         book = assemble_futures(
-            self.settings, self.store, cache, unquote(underlying).strip()
+            self.settings, self.store, cache, unquote(underlying).strip(), policy=self.policy
         )
-        return self._envelope(found=book.get("found"), futures=book)
+        return self._envelope(
+            found=book.get("found"), futures=book, data_state=self._state_of(book)
+        )
 
     def market_activity(self, symbol: str) -> dict[str, Any]:
         cache = self._load_instrument_cache()
+        wanted = unquote(symbol).strip()
         bundle = assemble_market_activity(
-            self.settings, self.store, cache, unquote(symbol).strip()
+            self.settings, self.store, cache, wanted, policy=self.policy
         )
         if bundle is None:
-            return self._envelope(found=False, activity=None)
+            return self._envelope(
+                found=False,
+                activity=None,
+                data_state=self.policy.snapshot(wanted).state.to_dict(),
+            )
         return self._envelope(found=True, **bundle)
 
     def unusual_activity(self, *, limit: int = 50) -> dict[str, Any]:
         cache = self._load_instrument_cache()
-        rows = assemble_unusual(self.settings, self.store, cache, limit=limit)
-        return self._envelope(unusual_activity=rows)
+        rows = assemble_unusual(
+            self.settings, self.store, cache, limit=limit, policy=self.policy
+        )
+        return self._envelope(
+            unusual_activity=rows, data_state=self.policy.overall_state().to_dict()
+        )
 
     def charts(self, symbol: str, *, interval: str | None = None) -> dict[str, Any]:
         series = assemble_charts(
-            self.settings, self.store, unquote(symbol).strip(), interval=interval
+            self.settings,
+            self.store,
+            unquote(symbol).strip(),
+            interval=interval,
+            policy=self.policy,
         )
         found = bool(series.get("points") or series.get("candles"))
-        return self._envelope(found=found, chart=series)
+        return self._envelope(found=found, chart=series, data_state=self._state_of(series))
 
     def watchlists(self) -> dict[str, Any]:
         self.store.ensure_default_watchlist(
@@ -226,25 +281,45 @@ class SqliteUiReadModel:
         )
         cache = self._load_instrument_cache()
         lists = self.store.list_watchlists()
-        quotes = []
-        seen: set[str] = set()
+        wanted: list[str] = []
         for item in lists:
             for symbol in item.get("symbols") or []:
-                if symbol in seen:
-                    continue
-                seen.add(symbol)
-                dto = assemble_quote(self.store, cache, symbol)
-                quotes.append({"symbol": symbol, "quote": dto, "found": dto is not None})
-        return self._envelope(quotes=quotes)
+                if symbol not in wanted:
+                    wanted.append(symbol)
+        snapshots = self.policy.snapshots(wanted)
+        quotes = []
+        for symbol in wanted:
+            dto = assemble_quote(
+                self.settings, self.store, cache, symbol, policy=self.policy
+            )
+            quotes.append(
+                {
+                    "symbol": symbol,
+                    "quote": dto,
+                    "found": dto is not None,
+                    "data_state": self._state_of(dto, symbol),
+                }
+            )
+        return self._envelope(
+            quotes=quotes,
+            data_state=self.policy.merged_state(snapshots.values()).to_dict(),
+        )
 
     def cross_market(self, underlying: str) -> dict[str, Any]:
         cache = self._require_cache()
         if cache is None:
-            return self._envelope(found=False, cross_market=None, reason="cache_file_missing")
+            return self._envelope(
+                found=False,
+                cross_market=None,
+                reason="cache_file_missing",
+                data_state=self.policy.no_data(reason="cache_file_missing").to_dict(),
+            )
         payload = assemble_cross_market(
-            self.settings, self.store, cache, unquote(underlying).strip()
+            self.settings, self.store, cache, unquote(underlying).strip(), policy=self.policy
         )
-        return self._envelope(found=True, cross_market=payload)
+        return self._envelope(
+            found=True, cross_market=payload, data_state=self._state_of(payload)
+        )
 
     def _require_cache(self) -> dict[str, Any] | None:
         return self._load_instrument_cache()
