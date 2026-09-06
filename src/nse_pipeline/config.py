@@ -134,6 +134,8 @@ class MarketAnalyticsSettings:
     baseline_min_observations: int = 30
     tod_bucket_minutes: int = 15
     chart_max_points: int = 500
+    chart_lookback_days: int = 10
+    option_risk_free_rate: float = 0.06
     unusual_high_score: float = 70.0
     sample_every_seconds: int = 60
     futures_basis_max_age_seconds: float = 10.0
@@ -618,6 +620,8 @@ def load_settings(config_path: Path | None = None) -> Settings:
         baseline_min_observations=int(an_cfg.get("baseline_min_observations", 30)),
         tod_bucket_minutes=int(an_cfg.get("tod_bucket_minutes", 15)),
         chart_max_points=int(an_cfg.get("chart_max_points", 500)),
+        chart_lookback_days=int(an_cfg.get("chart_lookback_days", 10)),
+        option_risk_free_rate=float(an_cfg.get("option_risk_free_rate", 0.06)),
         unusual_high_score=float(an_cfg.get("unusual_high_score", 70.0)),
         sample_every_seconds=int(an_cfg.get("sample_every_seconds", 60)),
         futures_basis_max_age_seconds=float(

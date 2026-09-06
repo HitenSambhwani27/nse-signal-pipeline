@@ -7,7 +7,8 @@ from typing import Any
 from nse_pipeline.config import MarketAnalyticsSettings, Settings
 from nse_pipeline.market.activity import market_activity_row, tod_bucket
 from nse_pipeline.market.cache_health import lookup_instrument_meta
-from nse_pipeline.market.charts import chart_payload
+from nse_pipeline.market.charts import CHART_POINT_FIELDS, chart_payload, merge_chart_rows
+from nse_pipeline.market.ohlc import load_historical_observations, load_ohlc_candles
 from nse_pipeline.market.cross_market import describe_cross_market
 from nse_pipeline.market.flow import (
     aggressive_side_proxy,
@@ -148,6 +149,8 @@ def assemble_option_chain(
         eligible_contract_count=eligible_count,
         selected_contract_count=selected_count,
         truncated=truncated,
+        rate=cfg.option_risk_free_rate,
+        close_hhmm=settings.session.market_close,
     )
     chain["available_expiries"] = expiries
     chain["found"] = bool(contracts)
@@ -295,22 +298,38 @@ def assemble_unusual(
 
 
 def assemble_charts(
-    settings: Settings, store: SQLiteStore, symbol: str
+    settings: Settings,
+    store: SQLiteStore,
+    symbol: str,
+    *,
+    interval: str | None = None,
 ) -> dict[str, Any]:
-    rows = store.fetch_activity_samples(symbol, limit=5000)
-    return chart_payload(
-        rows,
-        max_points=_cfg(settings).chart_max_points,
-        fields=(
-            "last_price",
-            "volume",
-            "oi",
-            "oi_delta",
-            "trade_notional",
-            "depth_imbalance",
-            "spread",
-        ),
+    cfg = _cfg(settings)
+    samples = store.fetch_activity_samples(symbol, limit=5000)
+    historical, hist_source = load_historical_observations(
+        settings, symbol, lookback_days=cfg.chart_lookback_days
     )
+    rows = merge_chart_rows(historical, samples)
+    payload = chart_payload(
+        rows,
+        max_points=cfg.chart_max_points,
+        fields=CHART_POINT_FIELDS,
+    )
+    payload.update(
+        load_ohlc_candles(
+            settings,
+            symbol,
+            interval=interval,
+            lookback_days=cfg.chart_lookback_days,
+        )
+    )
+    sources = []
+    if historical:
+        sources.append(hist_source or "compacted_ticks")
+    if samples:
+        sources.append("activity_samples")
+    payload["source"] = "+".join(sources) if sources else None
+    return payload
 
 
 def assemble_cross_market(
@@ -351,5 +370,8 @@ def assemble_cross_market(
             "eligible_contract_count": opt.get("eligible_contract_count"),
             "selected_contract_count": opt.get("selected_contract_count"),
             "missing_contract_count": opt.get("missing_contract_count"),
+            "quoted_contract_count": opt.get("quoted_contract_count"),
+            "quote_coverage": opt.get("quote_coverage"),
+            "quote_status": opt.get("quote_status"),
         },
     }

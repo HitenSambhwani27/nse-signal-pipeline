@@ -151,6 +151,9 @@ class SqliteUiReadModel:
                 "eligible_contract_count": chain.get("eligible_contract_count"),
                 "selected_contract_count": chain.get("selected_contract_count"),
                 "missing_contract_count": chain.get("missing_contract_count"),
+                "quoted_contract_count": chain.get("quoted_contract_count"),
+                "quote_coverage": chain.get("quote_coverage"),
+                "quote_status": chain.get("quote_status"),
                 "truncated": chain.get("truncated"),
                 "multi_strike": chain.get("multi_strike"),
             },
@@ -204,9 +207,12 @@ class SqliteUiReadModel:
         rows = assemble_unusual(self.settings, self.store, cache, limit=limit)
         return self._envelope(unusual_activity=rows)
 
-    def charts(self, symbol: str) -> dict[str, Any]:
-        series = assemble_charts(self.settings, self.store, unquote(symbol).strip())
-        return self._envelope(found=bool(series.get("points")), chart=series)
+    def charts(self, symbol: str, *, interval: str | None = None) -> dict[str, Any]:
+        series = assemble_charts(
+            self.settings, self.store, unquote(symbol).strip(), interval=interval
+        )
+        found = bool(series.get("points") or series.get("candles"))
+        return self._envelope(found=found, chart=series)
 
     def watchlists(self) -> dict[str, Any]:
         self.store.ensure_default_watchlist(

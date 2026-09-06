@@ -23,6 +23,39 @@ def downsample_points(rows: Sequence[dict[str, Any]], *, max_points: int) -> lis
     return out
 
 
+CHART_POINT_FIELDS = (
+    "last_price",
+    "volume",
+    "oi",
+    "oi_delta",
+    "volume_delta",
+    "trade_notional",
+    "depth_imbalance",
+    "spread",
+)
+
+
+def merge_chart_rows(
+    historical: Sequence[dict[str, Any]],
+    samples: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Union by timestamp. Activity samples win on overlap (more derived fields)."""
+    by_ts: dict[str, dict[str, Any]] = {}
+    for row in historical:
+        ts = row.get("timestamp")
+        if not ts:
+            continue
+        by_ts[str(ts)] = dict(row)
+    for row in samples:
+        ts = row.get("timestamp")
+        if not ts:
+            continue
+        key = str(ts)
+        prev = by_ts.get(key, {})
+        by_ts[key] = {**prev, **dict(row)}
+    return sorted(by_ts.values(), key=lambda r: str(r.get("timestamp") or ""))
+
+
 def chart_payload(
     rows: Sequence[dict[str, Any]],
     *,

@@ -23,7 +23,13 @@ from nse_pipeline.market.futures_analytics import (
     futures_snapshot,
     price_oi_interpretation,
 )
-from nse_pipeline.market.options_analytics import build_option_chain, chain_coverage, max_pain_strike, pcr
+from nse_pipeline.market.options_analytics import (
+    build_option_chain,
+    chain_coverage,
+    max_pain_strike,
+    pcr,
+    quote_fill,
+)
 from nse_pipeline.market.quality import dedupe_persisted_observations
 from nse_pipeline.market.universe import (
     allocate_stock_option_slots,
@@ -140,8 +146,78 @@ def test_option_chain_atm_oi_pcr_multistrike() -> None:
     assert chain["chain_completeness"] == 1.0
     assert chain["complete"] is True
     assert chain["chain_status"] == "complete"
+    assert chain["quote_status"] == "complete"
+    assert chain["quoted_contract_count"] == 6
+    assert chain["quote_coverage"] == 1.0
     assert len(chain["multi_strike"]) >= 1
     assert chain["max_pain"]["status"] == "ok"
+
+
+def test_option_chain_calculated_iv_and_null_when_unpriced() -> None:
+    price = None
+    from nse_pipeline.market.implied_vol import black_scholes_price, implied_volatility
+
+    tte = implied_volatility(
+        option_price=1.0,
+        spot=110,
+        strike=110,
+        expiry="2026-12-31",
+        option_type="CE",
+        as_of="2026-09-01T03:45:00+00:00",
+    )["tte_years"]
+    price = black_scholes_price(
+        spot=110,
+        strike=110,
+        time_to_expiry_years=tte,
+        rate=0.06,
+        volatility=0.2,
+        option_type="CE",
+    )
+    chain = build_option_chain(
+        underlying="NIFTY",
+        expiry="2026-12-31",
+        contracts=[
+            {
+                "tradingsymbol": "C110",
+                "instrument_type": "CE",
+                "strike": 110,
+                "expiry": "2026-12-31",
+                "name": "NIFTY",
+            },
+            {
+                "tradingsymbol": "P110",
+                "instrument_type": "PE",
+                "strike": 110,
+                "expiry": "2026-12-31",
+                "name": "NIFTY",
+            },
+        ],
+        quotes_by_symbol={
+            "C110": {
+                "symbol": "C110",
+                "last_price": price,
+                "timestamp": "2026-09-01T03:45:00+00:00",
+            }
+        },
+        spot=110,
+        interval=10,
+        atm_method="nearest_listed",
+        pcr_window=1,
+        max_pain_min_strikes=11,
+        max_pain_min_completeness=0.9,
+        as_of="2026-09-01T03:45:00+00:00",
+    )
+    ce = chain["strikes"][0]["ce"]
+    pe = chain["strikes"][0]["pe"]
+    assert ce["iv_source"] == "calculated"
+    assert ce["iv_model"] == "black_scholes"
+    assert ce["iv_rate"] == 0.06
+    assert ce["iv_dividend_yield"] == 0.0
+    assert ce["iv_exercise_style"] == "european"
+    assert ce["iv"] is not None
+    assert abs(ce["iv"] - 0.2) < 1e-3
+    assert pe["iv"] is None
+    assert pe["iv_reason"] == "missing_price"
 
 
 def test_partial_option_chain_completeness() -> None:
@@ -512,6 +588,10 @@ def test_chain_coverage_semantics() -> None:
     assert empty["chain_status"] == "empty"
     assert empty["complete"] is False
 
+    no_quotes = quote_fill(selected_contract_count=6, quoted_contract_count=0)
+    assert no_quotes["quote_status"] == "empty"
+    assert no_quotes["quote_coverage"] == 0.0
+
     chain = build_option_chain(
         underlying="AAA",
         expiry="2026-09-24",
@@ -535,6 +615,9 @@ def test_chain_coverage_semantics() -> None:
     assert chain["eligible_contract_count"] == 12
     assert chain["selected_contract_count"] == 2
     assert chain["chain_completeness"] < 1.0
+    assert chain["quote_status"] == "partial"
+    assert chain["quoted_contract_count"] == 1
+    assert chain["chain_status"] == "truncated"
 
 
 def test_analytics_api_nulls_and_envelope(tmp_path: Path) -> None:
@@ -582,7 +665,11 @@ def test_analytics_api_nulls_and_envelope(tmp_path: Path) -> None:
     assert by_exp["chain"]["pcr_oi"] is None
     assert by_exp["chain"]["max_pain"]["max_pain_strike"] is None
     assert by_exp["chain"]["chain_status"] in {"complete", "partial", "truncated", "empty"}
+    assert by_exp["chain"]["quote_status"] == "empty"
+    assert by_exp["chain"]["quoted_contract_count"] == 0
+    assert by_exp["chain"]["chain_status"] == "complete"
     assert "chain_status" in oi["oi"]
+    assert oi["oi"]["quote_status"] == "empty"
     assert "maturity" in oi and "as_of" in oi
     assert "maturity" in activity and "as_of" in activity
     fut = client.get("/api/v1/futures/NIFTY").json()

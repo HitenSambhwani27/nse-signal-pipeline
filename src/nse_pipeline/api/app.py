@@ -83,8 +83,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return read.unusual_activity(limit=limit)
 
     @app.get("/api/v1/charts/{symbol:path}")
-    def charts(symbol: str) -> dict[str, Any]:
-        return read.charts(symbol)
+    def charts(symbol: str, interval: str | None = None) -> dict[str, Any]:
+        return read.charts(symbol, interval=interval)
 
     @app.get("/api/v1/watchlists")
     def watchlists() -> dict[str, Any]:

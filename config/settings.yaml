@@ -92,6 +92,9 @@ analytics:
   baseline_min_observations: 30
   tod_bucket_minutes: 15
   chart_max_points: 500
+  chart_lookback_days: 10
+  # Documented Black-Scholes discount rate for calculated option IV only.
+  option_risk_free_rate: 0.06
   unusual_high_score: 70.0
   sample_every_seconds: 60
   futures_basis_max_age_seconds: 10

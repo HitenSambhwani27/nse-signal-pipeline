@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from nse_pipeline.market.implied_vol import implied_volatility
 from nse_pipeline.market.universe import atm_strike, infer_strike_interval, moneyness, strike_window
 
 
@@ -43,6 +44,33 @@ def chain_coverage(
         "complete": status == "complete",
         "chain_completeness": completeness,
     }
+
+
+def quote_fill(
+    *,
+    selected_contract_count: int,
+    quoted_contract_count: int,
+) -> dict[str, Any]:
+    """Live quote coverage for selected contracts. Distinct from chain_status."""
+    selected = max(0, int(selected_contract_count))
+    quoted = max(0, int(quoted_contract_count))
+    if selected <= 0 or quoted <= 0:
+        status = "empty"
+    elif quoted < selected:
+        status = "partial"
+    else:
+        status = "complete"
+    return {
+        "quoted_contract_count": quoted,
+        "quote_coverage": (quoted / selected) if selected else 0.0,
+        "quote_status": status,
+    }
+
+
+def _quote_is_live(quote: dict[str, Any] | None) -> bool:
+    if not quote:
+        return False
+    return _f(quote.get("last_price")) is not None or _f(quote.get("oi")) is not None
 
 
 def _f(value: Any) -> float | None:
@@ -112,16 +140,37 @@ def max_pain_strike(
     return payload
 
 
-def _side_from_quote(quote: dict[str, Any] | None, meta: dict[str, Any]) -> dict[str, Any]:
+def _side_from_quote(
+    quote: dict[str, Any] | None,
+    meta: dict[str, Any],
+    *,
+    spot: float | None,
+    rate: float,
+    as_of: Any = None,
+    close_hhmm: str = "15:30",
+    underlying: str | None = None,
+) -> dict[str, Any]:
     q = quote or {}
     oi = _f(q.get("oi"))
     prev_oi = None
     oi_change = _f(q.get("oi_delta") if "oi_delta" in q else q.get("oi_change"))
     if oi is not None and oi_change is not None:
         prev_oi = oi - oi_change
+    ltp = _f(q.get("last_price"))
+    iv_row = implied_volatility(
+        option_price=ltp,
+        spot=spot,
+        strike=meta.get("strike"),
+        expiry=meta.get("expiry"),
+        option_type=str(meta.get("instrument_type") or ""),
+        rate=rate,
+        as_of=as_of or q.get("timestamp"),
+        close_hhmm=close_hhmm,
+        underlying=str(meta.get("name") or underlying or ""),
+    )
     return {
         "symbol": q.get("symbol") or meta.get("tradingsymbol"),
-        "ltp": _f(q.get("last_price")),
+        "ltp": ltp,
         "price_change": _f(q.get("price_delta") if "price_delta" in q else q.get("change")),
         "price_change_pct": _f(q.get("change_pct")),
         "volume": q.get("volume"),
@@ -139,6 +188,16 @@ def _side_from_quote(quote: dict[str, Any] | None, meta: dict[str, Any]) -> dict
         "depth_imbalance": q.get("depth_imbalance"),
         "lot_size": meta.get("lot_size"),
         "tick_size": meta.get("tick_size"),
+        "iv": iv_row["iv"],
+        "iv_pct": iv_row["iv_pct"],
+        "iv_source": iv_row["iv_source"],
+        "iv_kind": iv_row["iv_kind"],
+        "iv_status": iv_row["iv_status"],
+        "iv_reason": iv_row["iv_reason"],
+        "iv_model": iv_row.get("iv_model"),
+        "iv_rate": iv_row.get("iv_rate"),
+        "iv_dividend_yield": iv_row.get("iv_dividend_yield"),
+        "iv_exercise_style": iv_row.get("iv_exercise_style"),
     }
 
 
@@ -157,6 +216,9 @@ def build_option_chain(
     eligible_contract_count: int | None = None,
     selected_contract_count: int | None = None,
     truncated: bool = False,
+    rate: float = 0.06,
+    as_of: Any = None,
+    close_hhmm: str = "15:30",
 ) -> dict[str, Any]:
     by_strike: dict[float, dict[str, Any]] = {}
     for meta in contracts:
@@ -169,7 +231,15 @@ def build_option_chain(
         )
         kind = str(meta.get("instrument_type") or "").upper()
         quote = quotes_by_symbol.get(str(meta.get("tradingsymbol")))
-        side = _side_from_quote(quote, meta)
+        side = _side_from_quote(
+            quote,
+            meta,
+            spot=spot,
+            rate=rate,
+            as_of=as_of,
+            close_hhmm=close_hhmm,
+            underlying=underlying,
+        )
         if kind == "CE":
             row["ce"] = side
             row["ce_meta"] = meta
@@ -217,7 +287,6 @@ def build_option_chain(
     window = strike_window(listed, atm, pcr_window)
     near_ce = sum(float((by_strike[s]["ce"] or {}).get("oi") or 0) for s in window)
     near_pe = sum(float((by_strike[s]["pe"] or {}).get("oi") or 0) for s in window)
-    have_quote = sum(1 for s in strikes_out if s["ce"] or s["pe"])
     selected = (
         int(selected_contract_count)
         if selected_contract_count is not None
@@ -228,12 +297,18 @@ def build_option_chain(
         if eligible_contract_count is not None
         else selected
     )
+    quoted = sum(
+        1
+        for meta in contracts
+        if _quote_is_live(quotes_by_symbol.get(str(meta.get("tradingsymbol"))))
+    )
     coverage = chain_coverage(
         eligible_contract_count=eligible,
         selected_contract_count=selected,
         truncated=truncated,
     )
-    observation_completeness = (have_quote / len(listed)) if listed else 0.0
+    fill = quote_fill(selected_contract_count=selected, quoted_contract_count=quoted)
+    observation_completeness = fill["quote_coverage"]
 
     def _ext(side: str, field: str, reverse: bool) -> dict[str, Any] | None:
         scored = []
@@ -290,9 +365,12 @@ def build_option_chain(
         "eligible_contract_count": coverage["eligible_contract_count"],
         "selected_contract_count": coverage["selected_contract_count"],
         "missing_contract_count": coverage["missing_contract_count"],
+        "quoted_contract_count": fill["quoted_contract_count"],
+        "quote_coverage": fill["quote_coverage"],
+        "quote_status": fill["quote_status"],
         "truncated": coverage["truncated"],
         "partial": coverage["partial"],
-        "observation_count": have_quote,
+        "observation_count": fill["quoted_contract_count"],
         "observation_completeness": observation_completeness,
         "number_of_strikes": len(listed),
         "pcr_oi": pcr(pe_oi if have_pe_oi else None, ce_oi if have_ce_oi else None),

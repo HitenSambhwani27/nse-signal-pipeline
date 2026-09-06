@@ -197,6 +197,76 @@ class DuckDBTickStore:
     def _daily_path(self, date_str: str, symbol: str) -> Path:
         return self.compacted_dir / date_str / symbol / "daily.parquet"
 
+    def _safe_symbol(self, symbol: str) -> str:
+        text = str(symbol or "").strip()
+        if not text or any(part in text for part in ("..", "/", "\\")):
+            raise ValueError("invalid chart symbol")
+        return text
+
+    def _sql_paths(self, paths: list[Path]) -> str:
+        quoted = ", ".join(f"'{str(p).replace(chr(92), '/')}'" for p in paths if p.exists())
+        return f"[{quoted}]" if len(paths) != 1 else f"'{str(paths[0]).replace(chr(92), '/')}'"
+
+    def list_dates_for_symbol(self, symbol: str, *, limit: int | None = None) -> list[str]:
+        """Compacted dates that already have this symbol. Newest `limit` dates."""
+        wanted = self._safe_symbol(symbol)
+        found: list[str] = []
+        for date_str in reversed(self.list_compacted_dates()):
+            day = self.compacted_dir / date_str / wanted
+            if not day.is_dir():
+                continue
+            if (
+                (day / "ticks.parquet").is_file()
+                or (day / "candles.parquet").is_file()
+                or (day / "daily.parquet").is_file()
+            ):
+                found.append(date_str)
+            if limit is not None and len(found) >= int(limit):
+                break
+        return list(reversed(found))
+
+    def read_symbol_observations(
+        self, symbol: str, dates: list[str]
+    ) -> pd.DataFrame:
+        wanted = self._safe_symbol(symbol)
+        paths = [self._ticks_path(d, wanted) for d in dates if self._ticks_path(d, wanted).is_file()]
+        if not paths:
+            return pd.DataFrame()
+        sql = f"""
+            SELECT timestamp, last_price, volume, oi
+            FROM read_parquet({self._sql_paths(paths)}, union_by_name=true)
+            WHERE last_price IS NOT NULL
+            ORDER BY timestamp
+        """
+        return self.query(sql)
+
+    def _read_paths(self, paths: list[Path]) -> pd.DataFrame:
+        if not paths:
+            return pd.DataFrame()
+        sql = f"""
+            SELECT * FROM read_parquet({self._sql_paths(paths)}, union_by_name=true)
+            ORDER BY timestamp
+        """
+        try:
+            return self.query(sql)
+        except Exception:
+            return pd.DataFrame()
+
+    def read_symbol_ohlc_frames(
+        self, symbol: str, dates: list[str]
+    ) -> dict[str, pd.DataFrame]:
+        """Unaggregated per-source frames. Session bucketing happens in ohlc.py."""
+        wanted = self._safe_symbol(symbol)
+        candle_paths = [p for p in (self._candles_path(d, wanted) for d in dates) if p.is_file()]
+        tick_paths = [self._ticks_path(d, wanted) for d in dates if self._ticks_path(d, wanted).is_file()]
+        daily_paths = [self._daily_path(d, wanted) for d in dates if self._daily_path(d, wanted).is_file()]
+        return {
+            "daily": self._read_paths(daily_paths),
+            "candles": self._read_paths(candle_paths),
+            "ticks": self._read_paths(tick_paths),
+        }
+
+
     def close_on(self, date_str: str, symbol: str) -> float | None:
         """Last close for a symbol on a date (ticks, else daily.parquet)."""
         from nse_pipeline.features.quality import session_close_price
