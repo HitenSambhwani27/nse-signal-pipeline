@@ -290,6 +290,20 @@ class RetrainSettings:
 
 
 @dataclass
+class RetentionSettings:
+    """Filesystem/SQLite retention. signal_log is never deleted."""
+
+    raw_sessions: int = 7
+    compacted_tick_sessions: int = 90
+    bars_1m_sessions: int = 400
+    daily_bars: str = "forever"
+    feature_log_days: int = 180
+    quality_log_days: int = 180
+    signal_log: str = "forever"
+    raw_bytes_per_session_estimate: int = 2_500_000_000
+
+
+@dataclass
 class KiteCredentials:
     api_key: str
     api_secret: str
@@ -323,6 +337,7 @@ class Settings:
         default_factory=StockDerivativesSettings
     )
     analytics: MarketAnalyticsSettings = field(default_factory=MarketAnalyticsSettings)
+    retention: RetentionSettings = field(default_factory=RetentionSettings)
     raw_config: dict[str, Any] = field(repr=False, default_factory=dict)
 
     def ensure_directories(self) -> None:
@@ -657,6 +672,20 @@ def load_settings(config_path: Path | None = None) -> Settings:
         ],
     )
 
+    ret_cfg = config.get("retention") or {}
+    retention = RetentionSettings(
+        raw_sessions=int(ret_cfg.get("raw_sessions", 7)),
+        compacted_tick_sessions=int(ret_cfg.get("compacted_tick_sessions", 90)),
+        bars_1m_sessions=int(ret_cfg.get("bars_1m_sessions", 400)),
+        daily_bars=str(ret_cfg.get("daily_bars", "forever")),
+        feature_log_days=int(ret_cfg.get("feature_log_days", 180)),
+        quality_log_days=int(ret_cfg.get("quality_log_days", 180)),
+        signal_log=str(ret_cfg.get("signal_log", "forever")),
+        raw_bytes_per_session_estimate=int(
+            ret_cfg.get("raw_bytes_per_session_estimate", 2_500_000_000)
+        ),
+    )
+
     settings = Settings(
         paths=paths,
         universe=universe,
@@ -679,6 +708,7 @@ def load_settings(config_path: Path | None = None) -> Settings:
         retrain=retrain,
         stock_derivatives=stock_derivatives,
         analytics=analytics,
+        retention=retention,
         raw_config=config,
     )
     settings.ensure_directories()

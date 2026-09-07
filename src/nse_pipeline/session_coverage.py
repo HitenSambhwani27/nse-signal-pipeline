@@ -7,6 +7,8 @@ analysis does not treat them as full open-to-close sessions.
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import datetime, time, timedelta
 from collections.abc import Iterable
@@ -25,6 +27,38 @@ LIVE_PILOT_TRADE_DATES = frozenset({"2026-08-13"})
 # Equity source=live days shorter than this are treated as incomplete live slices,
 # not full live sessions. Muhurat (historical, ~1h) is not live and is kept.
 _LIVE_PARTIAL_MAX_HOURS = 2.0
+
+
+def _warm_start_reason(settings: Settings, trade_date: str) -> str | None:
+    """A mid-session ingest start makes the day PARTIAL even if ticks later span the session."""
+    path = settings.paths.sqlite_db
+    if not path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        rows = conn.execute(
+            "SELECT details_json, timestamp FROM ingestion_meta WHERE event_type = 'warm_start'"
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    for details_json, timestamp in rows:
+        session_date = None
+        if details_json:
+            try:
+                details = json.loads(details_json)
+            except json.JSONDecodeError:
+                details = {}
+            session_date = details.get("session_date")
+        if session_date == trade_date:
+            return f"warm_start:{timestamp or session_date}"
+        if session_date is None and str(timestamp or "").startswith(trade_date):
+            return f"warm_start:{timestamp}"
+    return None
 
 
 CoverageStatus = Literal["full", "partial", "unknown"]
@@ -206,6 +240,9 @@ def assess_session_coverage(
             f"early_end: last_tick={last_ist.isoformat()} < "
             f"close-grace={close_earliest.isoformat()}"
         )
+    warm = _warm_start_reason(settings, trade_date)
+    if warm:
+        reasons.append(warm)
 
     status: CoverageStatus = "partial" if reasons else "full"
     return SessionCoverage(

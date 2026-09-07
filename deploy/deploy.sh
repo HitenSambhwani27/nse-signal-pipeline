@@ -134,7 +134,13 @@ INGEST_PIDS_BEFORE="$(ssh_cmd "pgrep -f '[p]ython.*01_run_ingestion' | tr '\n' '
 
 echo "Service status before deploy:"
 ssh_cmd "systemctl is-active nse-api nse-live-signals nse-account-capture || true"
-ssh_cmd "systemctl is-active nse-ingest 2>/dev/null || echo 'nse-ingest: not a systemd unit (expected)'"
+ssh_cmd "systemctl is-active nse-ingest 2>/dev/null || echo 'nse-ingest: not a systemd unit (expected until cutover)'"
+
+NTP_SYNC="$(ssh_cmd "timedatectl show -p NTPSynchronized --value 2>/dev/null || echo unknown")"
+echo "NTPSynchronized=${NTP_SYNC}"
+if [[ "${NTP_SYNC}" != "yes" ]]; then
+  die "VM clock is not NTP-synchronised (timedatectl NTPSynchronized=${NTP_SYNC})"
+fi
 
 # ------------------------------------------------------------
 echo
@@ -194,11 +200,24 @@ echo "[4/7] Restarting application services (NOT ingest)"
 
 ssh_cmd "set -euo pipefail
 for svc in nse-api nse-live-signals nse-account-capture; do
-  if ! systemctl cat \"\${svc}.service\" >/dev/null 2>&1; then
-    echo \"ERROR: systemd unit missing: \${svc}.service\" >&2
+  if [ ! -f '${REMOTE_DIR}/deploy/vm/'\${svc}'.service' ]; then
+    echo \"ERROR: unit file missing in repo: deploy/vm/\${svc}.service\" >&2
     exit 1
   fi
 done
+sudo cp '${REMOTE_DIR}/deploy/vm/nse-api.service' /etc/systemd/system/nse-api.service
+sudo cp '${REMOTE_DIR}/deploy/vm/nse-live-signals.service' /etc/systemd/system/nse-live-signals.service
+sudo cp '${REMOTE_DIR}/deploy/vm/nse-account-capture.service' /etc/systemd/system/nse-account-capture.service
+# Install ingest unit file only. Do not enable or start — a manual ingest may be live.
+sudo cp '${REMOTE_DIR}/deploy/vm/nse-ingest.service' /etc/systemd/system/nse-ingest.service
+if [ -f '${REMOTE_DIR}/deploy/vm/nse-retention.service' ]; then
+  sudo cp '${REMOTE_DIR}/deploy/vm/nse-retention.service' /etc/systemd/system/nse-retention.service
+  sudo cp '${REMOTE_DIR}/deploy/vm/nse-retention.timer' /etc/systemd/system/nse-retention.timer
+fi
+sudo systemctl daemon-reload
+if systemctl list-unit-files nse-retention.timer >/dev/null 2>&1; then
+  sudo systemctl enable --now nse-retention.timer
+fi
 sudo systemctl restart nse-api nse-live-signals nse-account-capture
 for i in \$(seq 1 20); do
   if curl -sS -o /dev/null --max-time 2 http://127.0.0.1:8080/api/v1/health; then
@@ -221,8 +240,9 @@ for svc in nse-api nse-live-signals nse-account-capture; do
     exit 1
   fi
 done
-echo 'ingest unit (must remain untouched):'
-systemctl is-active nse-ingest 2>/dev/null || echo 'nse-ingest: not a systemd unit (expected)'
+echo 'ingest unit (must remain untouched by this deploy):'
+systemctl is-active nse-ingest 2>/dev/null || echo 'nse-ingest: inactive (expected until cutover)'
+systemctl is-enabled nse-ingest 2>/dev/null || echo 'nse-ingest: not enabled (expected until cutover)'
 "
 
 # ------------------------------------------------------------

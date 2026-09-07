@@ -297,3 +297,15 @@ resilience:
   reconnect_initial_seconds: 2
   reconnect_max_seconds: 60
   reconnect_multiplier: 2.0
+
+# Disk lifecycle (N-1). signal_log is the model audit trail — never prune it.
+# The retention job defaults to dry-run; apply only after reviewing the plan.
+retention:
+  raw_sessions: 7
+  compacted_tick_sessions: 90
+  bars_1m_sessions: 400
+  daily_bars: forever
+  feature_log_days: 180
+  quality_log_days: 180
+  signal_log: forever
+  raw_bytes_per_session_estimate: 2500000000

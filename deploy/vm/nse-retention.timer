@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekday NSE retention dry-run after labels (17:00 IST)
+
+[Timer]
+OnCalendar=Mon..Fri 17:00:00
+Persistent=true
+Unit=nse-retention.service
+
+[Install]
+WantedBy=timers.target

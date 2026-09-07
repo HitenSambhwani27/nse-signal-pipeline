@@ -1,17 +1,20 @@
 [Unit]
-Description=NSE live websocket ingest (market hours)
+Description=NSE live websocket ingest (EXAMPLE — use nse-ingest.service)
 After=network.target
-# Example only — do not enable a second ingest from the PC.
-# Production ingest already runs on the VM.
+# Kept so older docs still resolve. Production unit is nse-ingest.service.
+# Never enable a second ingest from a PC checkout.
 
 [Service]
 Type=simple
 User=nse
 WorkingDirectory=/home/nse/nse-signal-pipeline
 Environment=PYTHONPATH=src
+EnvironmentFile=-/home/nse/nse-signal-pipeline/.env
 ExecStart=/home/nse/nse-signal-pipeline/.venv/bin/python scripts/01_run_ingestion.py
 Restart=on-failure
-RestartSec=10
+RestartSec=30
+KillSignal=SIGTERM
+TimeoutStopSec=60
 
 [Install]
 WantedBy=multi-user.target

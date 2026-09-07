@@ -1,0 +1,145 @@
+{
+  "http_status": 200,
+  "path": "/api/v1/overview",
+  "payload": {
+    "maturity": {
+      "equity": {
+        "class_key": "equity",
+        "underlying": null,
+        "tier": "suppressed",
+        "pooled_live_days": 4,
+        "threshold_days": 60,
+        "suppress_below_days": 10,
+        "display": "insufficient data, 4/60 pooled days",
+        "probability_permitted": false,
+        "reason": "no_harness_passed_model"
+      },
+      "futures": {
+        "class_key": "futures",
+        "underlying": null,
+        "tier": "suppressed",
+        "pooled_live_days": 4,
+        "threshold_days": 60,
+        "suppress_below_days": 10,
+        "display": "insufficient data, 4/60 pooled days",
+        "probability_permitted": false,
+        "reason": "no_harness_passed_model"
+      },
+      "options_nifty": {
+        "class_key": "options",
+        "underlying": "NIFTY",
+        "tier": "suppressed",
+        "pooled_live_days": 1,
+        "threshold_days": 60,
+        "suppress_below_days": 10,
+        "display": "insufficient data, 1/60 pooled days",
+        "probability_permitted": false,
+        "reason": "no_harness_passed_model",
+        "note": "Cumulative trading days across the rolling contract sequence, not per individual weekly/monthly contract."
+      },
+      "options_banknifty": {
+        "class_key": "options",
+        "underlying": "BANKNIFTY",
+        "tier": "suppressed",
+        "pooled_live_days": 1,
+        "threshold_days": 60,
+        "suppress_below_days": 10,
+        "display": "insufficient data, 1/60 pooled days",
+        "probability_permitted": false,
+        "reason": "no_harness_passed_model",
+        "note": "Cumulative trading days across the rolling contract sequence, not per individual weekly/monthly contract."
+      }
+    },
+    "as_of": "2026-09-07T10:04:49.385761+00:00",
+    "subsystems": {
+      "options": {
+        "status": "OK",
+        "reason": null
+      },
+      "futures": {
+        "status": "OK",
+        "reason": null
+      },
+      "activity": {
+        "status": "OK",
+        "reason": null
+      },
+      "intelligence": {
+        "status": "NOT_MATURE",
+        "reason": "maturity_gate"
+      },
+      "charts": {
+        "status": "OK",
+        "reason": null
+      }
+    },
+    "last_ingest": {
+      "timestamp": "2026-09-07T10:04:43.110822+00:00",
+      "event_type": "flush",
+      "message": "Parquet flush"
+    },
+    "last_feature": "2026-09-04",
+    "last_signal": "2026-09-04",
+    "processing_status": {
+      "features": {
+        "job": "features",
+        "last_trade_date": "2026-09-04",
+        "last_timestamp": null,
+        "status": "ok",
+        "rows_written": 35521,
+        "updated_at": "2026-09-04T11:01:07.744570+00:00",
+        "details": {
+          "skipped": false
+        }
+      },
+      "labels": {
+        "job": "labels",
+        "last_trade_date": "2026-09-04",
+        "last_timestamp": null,
+        "status": "idle",
+        "rows_written": 0,
+        "updated_at": "2026-09-04T11:00:08.746905+00:00",
+        "details": {
+          "skipped": true
+        }
+      },
+      "signals": {
+        "job": "signals",
+        "last_trade_date": "2026-09-04",
+        "last_timestamp": "2026-09-04T10:25:00+00:00",
+        "status": "ok",
+        "rows_written": 35521,
+        "updated_at": "2026-09-04T11:01:14.021374+00:00",
+        "details": null
+      },
+      "account": {
+        "job": "account",
+        "last_trade_date": null,
+        "last_timestamp": null,
+        "status": "ok",
+        "rows_written": 0,
+        "updated_at": "2026-09-07T10:04:22.492675+00:00",
+        "details": {
+          "order_events": 0,
+          "trade_fills": 0,
+          "holdings": 1,
+          "positions": 1,
+          "margins": 1
+        }
+      }
+    },
+    "signal_counts": {
+      "total": 55549,
+      "live_engine": 55549,
+      "suppressed": 55549
+    },
+    "data_state": {
+      "market_state": "closed",
+      "data_status": "last_session",
+      "as_of": "2026-09-07T21:04:48+05:30",
+      "session_date": "2026-09-07",
+      "source": "latest_quotes",
+      "reason": "market_closed"
+    }
+  }
+}

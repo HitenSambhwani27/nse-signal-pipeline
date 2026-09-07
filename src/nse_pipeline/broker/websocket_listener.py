@@ -12,7 +12,9 @@ import signal
 import sys
 import threading
 import time
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from kiteconnect import KiteConnect
 from kiteconnect import KiteTicker
@@ -23,6 +25,7 @@ from nse_pipeline.broker.instruments import (
     token_to_symbol_map,
     tokens_by_subscribe_mode,
 )
+from nse_pipeline.broker.session import AUTH_BACKOFF_SECONDS, TokenState, classify_exception
 from nse_pipeline.config import Settings
 from nse_pipeline.market.activity import tod_bucket, trade_notional
 from nse_pipeline.market.latest import LatestQuoteTracker
@@ -68,6 +71,7 @@ class WebSocketIngestionService:
         self._ticker: KiteTicker | None = None
         self._reconnect_delay = settings.resilience.reconnect_initial_seconds
         self._rows_since_meta = 0
+        self._auth_invalid = False
 
     def _build_ticker(self) -> KiteTicker:
         creds = self.settings.kite
@@ -93,6 +97,7 @@ class WebSocketIngestionService:
             },
         )
         self._reconnect_delay = self.settings.resilience.reconnect_initial_seconds
+        self._auth_invalid = False
 
         # Dual-mode subscribe: Nifty 100 / F&O / spots = FULL; N500\\N100 = QUOTE.
         if self.tokens:
@@ -119,6 +124,8 @@ class WebSocketIngestionService:
 
     def _on_error(self, ws, code, reason) -> None:
         logger.error("WebSocket error: code=%s reason=%s", code, reason)
+        if classify_exception(RuntimeError(str(reason))) == TokenState.INVALID:
+            self._auth_invalid = True
         self.store.log_ingestion_event(
             event_type="error",
             message=f"WebSocket error code={code}",
@@ -133,13 +140,12 @@ class WebSocketIngestionService:
         )
 
     def _on_noreconnect(self, ws) -> None:
-        logger.error("WebSocket gave up reconnecting.")
+        logger.error("WebSocket gave up reconnecting; process stays up and will back off.")
         self.store.log_ingestion_event(
             event_type="noreconnect",
-            message="WebSocket will not reconnect further",
+            message="WebSocket will not reconnect further; supervised process will retry",
         )
         self._connection_lost_event.set()
-        self._stop_event.set()
 
     def _on_ticks(self, ws, ticks: list[dict[str, Any]]) -> None:
         for raw_tick in ticks:
@@ -228,6 +234,34 @@ class WebSocketIngestionService:
             except Exception as exc:
                 logger.warning("Error closing ticker: %s", exc)
 
+    def _log_warm_start_if_needed(self) -> None:
+        """Record a mid-session start so coverage can mark PARTIAL_SESSION.
+
+        First observation per token still has null volume/OI deltas because
+        LatestQuoteTracker starts empty — this event is the disclosure, not a
+        second delta source.
+        """
+        session = self.settings.session
+        now = datetime.now(ZoneInfo(session.timezone))
+        if now.weekday() >= 5:
+            return
+        open_h, open_m = (int(p) for p in session.market_open.split(":"))
+        close_h, close_m = (int(p) for p in session.market_close.split(":"))
+        open_t = now.replace(hour=open_h, minute=open_m, second=0, microsecond=0)
+        close_t = now.replace(hour=close_h, minute=close_m, second=0, microsecond=0)
+        if not (open_t < now < close_t):
+            return
+        self.store.log_ingestion_event(
+            event_type="warm_start",
+            message="Ingestion started after market open",
+            details={
+                "session_date": now.date().isoformat(),
+                "started_at": now.isoformat(),
+                "market_open": session.market_open,
+                "tokens": len(self.tokens),
+            },
+        )
+
     def run_forever(self) -> None:
         """Blocking run loop with manual reconnect if KiteTicker stops."""
         self._install_signal_handlers()
@@ -236,6 +270,7 @@ class WebSocketIngestionService:
             message="Ingestion service starting",
             details={"tokens": len(self.tokens)},
         )
+        self._log_warm_start_if_needed()
 
         while not self._stop_event.is_set():
             self._connection_lost_event.clear()
@@ -245,6 +280,8 @@ class WebSocketIngestionService:
                 self._ticker.connect(threaded=True)
             except Exception as exc:
                 logger.exception("Failed to connect WebSocket: %s", exc)
+                if classify_exception(exc) == TokenState.INVALID:
+                    self._auth_invalid = True
                 self.store.log_ingestion_event(
                     event_type="connect_failed",
                     message=str(exc),
@@ -259,7 +296,14 @@ class WebSocketIngestionService:
                 break
 
             # Exponential backoff before rebuilding ticker.
-            delay = min(self._reconnect_delay, self.settings.resilience.reconnect_max_seconds)
+            if self._auth_invalid:
+                delay = float(AUTH_BACKOFF_SECONDS)
+                logger.error(
+                    "Kite token invalid; backing off %.0f seconds instead of hot-looping.",
+                    delay,
+                )
+            else:
+                delay = min(self._reconnect_delay, self.settings.resilience.reconnect_max_seconds)
             logger.info("Reconnecting in %.1f seconds...", delay)
             time.sleep(delay)
             self._reconnect_delay = min(

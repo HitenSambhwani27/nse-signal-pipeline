@@ -1,0 +1,331 @@
+{
+  "http_status": 200,
+  "path": "/api/v1/unusual-activity?limit=10",
+  "payload": {
+    "maturity": {
+      "equity": {
+        "class_key": "equity",
+        "underlying": null,
+        "tier": "suppressed",
+        "pooled_live_days": 4,
+        "threshold_days": 60,
+        "suppress_below_days": 10,
+        "display": "insufficient data, 4/60 pooled days",
+        "probability_permitted": false,
+        "reason": "no_harness_passed_model"
+      },
+      "futures": {
+        "class_key": "futures",
+        "underlying": null,
+        "tier": "suppressed",
+        "pooled_live_days": 4,
+        "threshold_days": 60,
+        "suppress_below_days": 10,
+        "display": "insufficient data, 4/60 pooled days",
+        "probability_permitted": false,
+        "reason": "no_harness_passed_model"
+      },
+      "options_nifty": {
+        "class_key": "options",
+        "underlying": "NIFTY",
+        "tier": "suppressed",
+        "pooled_live_days": 1,
+        "threshold_days": 60,
+        "suppress_below_days": 10,
+        "display": "insufficient data, 1/60 pooled days",
+        "probability_permitted": false,
+        "reason": "no_harness_passed_model",
+        "note": "Cumulative trading days across the rolling contract sequence, not per individual weekly/monthly contract."
+      },
+      "options_banknifty": {
+        "class_key": "options",
+        "underlying": "BANKNIFTY",
+        "tier": "suppressed",
+        "pooled_live_days": 1,
+        "threshold_days": 60,
+        "suppress_below_days": 10,
+        "display": "insufficient data, 1/60 pooled days",
+        "probability_permitted": false,
+        "reason": "no_harness_passed_model",
+        "note": "Cumulative trading days across the rolling contract sequence, not per individual weekly/monthly contract."
+      }
+    },
+    "as_of": "2026-09-07T10:04:50.369373+00:00",
+    "subsystems": {
+      "options": {
+        "status": "OK",
+        "reason": null
+      },
+      "futures": {
+        "status": "OK",
+        "reason": null
+      },
+      "activity": {
+        "status": "OK",
+        "reason": null
+      },
+      "intelligence": {
+        "status": "NOT_MATURE",
+        "reason": "maturity_gate"
+      },
+      "charts": {
+        "status": "OK",
+        "reason": null
+      }
+    },
+    "unusual_activity": [
+      {
+        "symbol": "BANKNIFTY26SEP57000PE",
+        "activity_level": "watch",
+        "activity_score": 30.0,
+        "reasons": [
+          "bid depth dropped sharply",
+          "displayed liquidity withdrawn",
+          "spread widened",
+          "last price near/at displayed ask (buy-pressure proxy)"
+        ],
+        "kind": "inferred",
+        "note": "Deterministic score from observable/derived metrics. Not a machine-learning probability or a participant-identity claim.",
+        "liquidity_events": [
+          "liquidity_withdrawn",
+          "bid_depth_shock",
+          "spread_widening"
+        ],
+        "aggressive_proxy": "aggressive_buy_proxy",
+        "data_state": {
+          "market_state": "closed",
+          "data_status": "last_session",
+          "as_of": "2026-09-07T21:04:48+05:30",
+          "session_date": "2026-09-07",
+          "source": "latest_quotes",
+          "reason": "market_closed"
+        }
+      },
+      {
+        "symbol": "BANKNIFTY26OCTFUT",
+        "activity_level": "watch",
+        "activity_score": 24.0,
+        "reasons": [
+          "bid depth dropped sharply",
+          "displayed liquidity withdrawn",
+          "last price near/at displayed ask (buy-pressure proxy)"
+        ],
+        "kind": "inferred",
+        "note": "Deterministic score from observable/derived metrics. Not a machine-learning probability or a participant-identity claim.",
+        "liquidity_events": [
+          "liquidity_withdrawn",
+          "bid_depth_shock"
+        ],
+        "aggressive_proxy": "aggressive_buy_proxy",
+        "data_state": {
+          "market_state": "closed",
+          "data_status": "last_session",
+          "as_of": "2026-09-07T21:04:48+05:30",
+          "session_date": "2026-09-07",
+          "source": "latest_quotes",
+          "reason": "market_closed"
+        }
+      },
+      {
+        "symbol": "BANKNIFTY26SEP56500PE",
+        "activity_level": "watch",
+        "activity_score": 24.0,
+        "reasons": [
+          "ask depth dropped sharply",
+          "displayed liquidity withdrawn",
+          "last price near/at displayed bid (sell-pressure proxy)"
+        ],
+        "kind": "inferred",
+        "note": "Deterministic score from observable/derived metrics. Not a machine-learning probability or a participant-identity claim.",
+        "liquidity_events": [
+          "liquidity_withdrawn",
+          "ask_depth_shock"
+        ],
+        "aggressive_proxy": "aggressive_sell_proxy",
+        "data_state": {
+          "market_state": "closed",
+          "data_status": "last_session",
+          "as_of": "2026-09-07T21:04:48+05:30",
+          "session_date": "2026-09-07",
+          "source": "latest_quotes",
+          "reason": "market_closed"
+        }
+      },
+      {
+        "symbol": "BANKNIFTY26SEP57100PE",
+        "activity_level": "watch",
+        "activity_score": 24.0,
+        "reasons": [
+          "ask depth dropped sharply",
+          "displayed liquidity withdrawn",
+          "last price near/at displayed ask (buy-pressure proxy)"
+        ],
+        "kind": "inferred",
+        "note": "Deterministic score from observable/derived metrics. Not a machine-learning probability or a participant-identity claim.",
+        "liquidity_events": [
+          "liquidity_withdrawn",
+          "ask_depth_shock",
+          "spread_compression"
+        ],
+        "aggressive_proxy": "aggressive_buy_proxy",
+        "data_state": {
+          "market_state": "closed",
+          "data_status": "last_session",
+          "as_of": "2026-09-07T21:04:48+05:30",
+          "session_date": "2026-09-07",
+          "source": "latest_quotes",
+          "reason": "market_closed"
+        }
+      },
+      {
+        "symbol": "BANKNIFTY26SEP57200PE",
+        "activity_level": "watch",
+        "activity_score": 24.0,
+        "reasons": [
+          "ask depth dropped sharply",
+          "displayed liquidity withdrawn",
+          "last price near/at displayed bid (sell-pressure proxy)"
+        ],
+        "kind": "inferred",
+        "note": "Deterministic score from observable/derived metrics. Not a machine-learning probability or a participant-identity claim.",
+        "liquidity_events": [
+          "liquidity_withdrawn",
+          "ask_depth_shock"
+        ],
+        "aggressive_proxy": "aggressive_sell_proxy",
+        "data_state": {
+          "market_state": "closed",
+          "data_status": "last_session",
+          "as_of": "2026-09-07T21:04:48+05:30",
+          "session_date": "2026-09-07",
+          "source": "latest_quotes",
+          "reason": "market_closed"
+        }
+      },
+      {
+        "symbol": "BANKNIFTY26SEP57300CE",
+        "activity_level": "watch",
+        "activity_score": 24.0,
+        "reasons": [
+          "bid depth dropped sharply",
+          "displayed liquidity withdrawn",
+          "last price near/at displayed ask (buy-pressure proxy)"
+        ],
+        "kind": "inferred",
+        "note": "Deterministic score from observable/derived metrics. Not a machine-learning probability or a participant-identity claim.",
+        "liquidity_events": [
+          "liquidity_withdrawn",
+          "bid_depth_shock"
+        ],
+        "aggressive_proxy": "aggressive_buy_proxy",
+        "data_state": {
+          "market_state": "closed",
+          "data_status": "last_session",
+          "as_of": "2026-09-07T21:04:47+05:30",
+          "session_date": "2026-09-07",
+          "source": "latest_quotes",
+          "reason": "market_closed"
+        }
+      },
+      {
+        "symbol": "BANKNIFTY26SEP57000CE",
+        "activity_level": "watch",
+        "activity_score": 12.0,
+        "reasons": [
+          "displayed liquidity withdrawn",
+          "last price near/at displayed bid (sell-pressure proxy)"
+        ],
+        "kind": "inferred",
+        "note": "Deterministic score from observable/derived metrics. Not a machine-learning probability or a participant-identity claim.",
+        "liquidity_events": [
+          "liquidity_withdrawn"
+        ],
+        "aggressive_proxy": "aggressive_sell_proxy",
+        "data_state": {
+          "market_state": "closed",
+          "data_status": "last_session",
+          "as_of": "2026-09-07T21:04:48+05:30",
+          "session_date": "2026-09-07",
+          "source": "latest_quotes",
+          "reason": "market_closed"
+        }
+      },
+      {
+        "symbol": "BANKNIFTY26SEP57200CE",
+        "activity_level": "watch",
+        "activity_score": 10.0,
+        "reasons": [
+          "spread widened",
+          "last price near/at displayed ask (buy-pressure proxy)"
+        ],
+        "kind": "inferred",
+        "note": "Deterministic score from observable/derived metrics. Not a machine-learning probability or a participant-identity claim.",
+        "liquidity_events": [
+          "liquidity_added",
+          "spread_widening"
+        ],
+        "aggressive_proxy": "aggressive_buy_proxy",
+        "data_state": {
+          "market_state": "closed",
+          "data_status": "last_session",
+          "as_of": "2026-09-07T21:04:48+05:30",
+          "session_date": "2026-09-07",
+          "source": "latest_quotes",
+          "reason": "market_closed"
+        }
+      },
+      {
+        "symbol": "BANKNIFTY26SEP56500CE",
+        "activity_level": "watch",
+        "activity_score": 8.0,
+        "reasons": [
+          "displayed liquidity withdrawn"
+        ],
+        "kind": "inferred",
+        "note": "Deterministic score from observable/derived metrics. Not a machine-learning probability or a participant-identity claim.",
+        "liquidity_events": [
+          "liquidity_withdrawn"
+        ],
+        "aggressive_proxy": "unknown",
+        "data_state": {
+          "market_state": "closed",
+          "data_status": "last_session",
+          "as_of": "2026-09-07T21:04:48+05:30",
+          "session_date": "2026-09-07",
+          "source": "latest_quotes",
+          "reason": "market_closed"
+        }
+      },
+      {
+        "symbol": "BANKNIFTY26SEP56600CE",
+        "activity_level": "watch",
+        "activity_score": 4.0,
+        "reasons": [
+          "last price near/at displayed ask (buy-pressure proxy)"
+        ],
+        "kind": "inferred",
+        "note": "Deterministic score from observable/derived metrics. Not a machine-learning probability or a participant-identity claim.",
+        "liquidity_events": [
+          "liquidity_added"
+        ],
+        "aggressive_proxy": "aggressive_buy_proxy",
+        "data_state": {
+          "market_state": "closed",
+          "data_status": "last_session",
+          "as_of": "2026-09-07T21:04:48+05:30",
+          "session_date": "2026-09-07",
+          "source": "latest_quotes",
+          "reason": "market_closed"
+        }
+      }
+    ],
+    "data_state": {
+      "market_state": "closed",
+      "data_status": "last_session",
+      "as_of": "2026-09-07T21:04:48+05:30",
+      "session_date": "2026-09-07",
+      "source": "latest_quotes",
+      "reason": "market_closed"
+    }
+  }
+}

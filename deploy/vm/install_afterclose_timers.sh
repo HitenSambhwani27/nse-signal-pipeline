@@ -8,7 +8,9 @@ sed -i 's/\r$//' "$ROOT/deploy/vm/run_afterclose_today.sh" \
   "$ROOT/deploy/vm/nse-features.service" \
   "$ROOT/deploy/vm/nse-features.timer" \
   "$ROOT/deploy/vm/nse-labels.service" \
-  "$ROOT/deploy/vm/nse-labels.timer" || true
+  "$ROOT/deploy/vm/nse-labels.timer" \
+  "$ROOT/deploy/vm/nse-retention.service" \
+  "$ROOT/deploy/vm/nse-retention.timer" || true
 chmod +x "$ROOT/deploy/vm/run_afterclose_today.sh"
 
 sudo cp "$ROOT/deploy/vm/nse-compact.service" /etc/systemd/system/nse-compact.service
@@ -17,15 +19,17 @@ sudo cp "$ROOT/deploy/vm/nse-features.service" /etc/systemd/system/nse-features.
 sudo cp "$ROOT/deploy/vm/nse-features.timer" /etc/systemd/system/nse-features.timer
 sudo cp "$ROOT/deploy/vm/nse-labels.service" /etc/systemd/system/nse-labels.service
 sudo cp "$ROOT/deploy/vm/nse-labels.timer" /etc/systemd/system/nse-labels.timer
+sudo cp "$ROOT/deploy/vm/nse-retention.service" /etc/systemd/system/nse-retention.service
+sudo cp "$ROOT/deploy/vm/nse-retention.timer" /etc/systemd/system/nse-retention.timer
 sudo systemctl daemon-reload
-sudo systemctl enable --now nse-compact.timer nse-features.timer nse-labels.timer
+sudo systemctl enable --now nse-compact.timer nse-features.timer nse-labels.timer nse-retention.timer
 
 echo "=== is-enabled timers ==="
-systemctl is-enabled nse-compact.timer nse-features.timer nse-labels.timer
+systemctl is-enabled nse-compact.timer nse-features.timer nse-labels.timer nse-retention.timer
 echo "=== is-active timers ==="
-systemctl is-active nse-compact.timer nse-features.timer nse-labels.timer
+systemctl is-active nse-compact.timer nse-features.timer nse-labels.timer nse-retention.timer
 echo "=== list-timers ==="
-systemctl list-timers nse-compact.timer nse-features.timer nse-labels.timer --no-pager
+systemctl list-timers nse-compact.timer nse-features.timer nse-labels.timer nse-retention.timer --no-pager
 echo "=== status ==="
 systemctl status nse-compact.timer nse-features.timer nse-labels.timer --no-pager -l
 echo "=== timedatectl ==="

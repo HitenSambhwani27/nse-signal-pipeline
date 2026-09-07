@@ -1,0 +1,68 @@
+{
+  "health": {
+    "file": "last_session__health.json",
+    "http_status": 200,
+    "kind": "last_session",
+    "path": "/api/v1/health"
+  },
+  "overview": {
+    "file": "last_session__overview.json",
+    "http_status": 200,
+    "kind": "last_session",
+    "path": "/api/v1/overview"
+  },
+  "maturity": {
+    "file": "unclassified__maturity.json",
+    "http_status": 200,
+    "kind": "unclassified",
+    "path": "/api/v1/maturity"
+  },
+  "quote_nifty": {
+    "file": "last_session__quote_nifty.json",
+    "http_status": 200,
+    "kind": "last_session",
+    "path": "/api/v1/quotes/NIFTY%2050"
+  },
+  "quote_hdfcbank": {
+    "file": "last_session__quote_hdfcbank.json",
+    "http_status": 200,
+    "kind": "last_session",
+    "path": "/api/v1/quotes/HDFCBANK"
+  },
+  "quote_missing": {
+    "file": "no_data__quote_missing.json",
+    "http_status": 200,
+    "kind": "no_data",
+    "path": "/api/v1/quotes/__NO_SUCH_SYMBOL__"
+  },
+  "options_nifty": {
+    "file": "last_session__options_nifty.json",
+    "http_status": 200,
+    "kind": "last_session",
+    "path": "/api/v1/options/NIFTY"
+  },
+  "options_banknifty": {
+    "file": "last_session__options_banknifty.json",
+    "http_status": 200,
+    "kind": "last_session",
+    "path": "/api/v1/options/BANKNIFTY"
+  },
+  "futures_nifty": {
+    "file": "last_session__futures_nifty.json",
+    "http_status": 200,
+    "kind": "last_session",
+    "path": "/api/v1/futures/NIFTY"
+  },
+  "unusual_activity": {
+    "file": "last_session__unusual_activity.json",
+    "http_status": 200,
+    "kind": "last_session",
+    "path": "/api/v1/unusual-activity?limit=10"
+  },
+  "watchlist_quotes": {
+    "file": "last_session__watchlist_quotes.json",
+    "http_status": 200,
+    "kind": "last_session",
+    "path": "/api/v1/watchlists/quotes"
+  }
+}

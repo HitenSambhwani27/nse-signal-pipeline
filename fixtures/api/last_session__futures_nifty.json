@@ -1,0 +1,196 @@
+{
+  "http_status": 200,
+  "path": "/api/v1/futures/NIFTY",
+  "payload": {
+    "maturity": {
+      "equity": {
+        "class_key": "equity",
+        "underlying": null,
+        "tier": "suppressed",
+        "pooled_live_days": 4,
+        "threshold_days": 60,
+        "suppress_below_days": 10,
+        "display": "insufficient data, 4/60 pooled days",
+        "probability_permitted": false,
+        "reason": "no_harness_passed_model"
+      },
+      "futures": {
+        "class_key": "futures",
+        "underlying": null,
+        "tier": "suppressed",
+        "pooled_live_days": 4,
+        "threshold_days": 60,
+        "suppress_below_days": 10,
+        "display": "insufficient data, 4/60 pooled days",
+        "probability_permitted": false,
+        "reason": "no_harness_passed_model"
+      },
+      "options_nifty": {
+        "class_key": "options",
+        "underlying": "NIFTY",
+        "tier": "suppressed",
+        "pooled_live_days": 1,
+        "threshold_days": 60,
+        "suppress_below_days": 10,
+        "display": "insufficient data, 1/60 pooled days",
+        "probability_permitted": false,
+        "reason": "no_harness_passed_model",
+        "note": "Cumulative trading days across the rolling contract sequence, not per individual weekly/monthly contract."
+      },
+      "options_banknifty": {
+        "class_key": "options",
+        "underlying": "BANKNIFTY",
+        "tier": "suppressed",
+        "pooled_live_days": 1,
+        "threshold_days": 60,
+        "suppress_below_days": 10,
+        "display": "insufficient data, 1/60 pooled days",
+        "probability_permitted": false,
+        "reason": "no_harness_passed_model",
+        "note": "Cumulative trading days across the rolling contract sequence, not per individual weekly/monthly contract."
+      }
+    },
+    "as_of": "2026-09-07T10:04:49.732811+00:00",
+    "subsystems": {
+      "options": {
+        "status": "OK",
+        "reason": null
+      },
+      "futures": {
+        "status": "OK",
+        "reason": null
+      },
+      "activity": {
+        "status": "OK",
+        "reason": null
+      },
+      "intelligence": {
+        "status": "NOT_MATURE",
+        "reason": "maturity_gate"
+      },
+      "charts": {
+        "status": "OK",
+        "reason": null
+      }
+    },
+    "found": true,
+    "futures": {
+      "underlying": "NIFTY",
+      "spot": 23779.15,
+      "spot_symbol": "NIFTY 50",
+      "spot_as_of": "2026-09-07T15:34:48+00:00",
+      "contracts": [
+        {
+          "symbol": "NIFTY26SEPFUT",
+          "underlying": "NIFTY",
+          "expiry": "2026-09-29",
+          "lot_size": 65,
+          "tick_size": 0.1,
+          "ltp": 23862.3,
+          "price_change": 0.0,
+          "price_change_pct": 0.0,
+          "volume": 2262910,
+          "volume_delta": 0,
+          "oi": 17644445,
+          "oi_change": 0.0,
+          "oi_change_pct": 0.0,
+          "last_quantity": 65,
+          "best_bid": 23857.5,
+          "best_ask": 23862.3,
+          "spread": 4.799999999999272,
+          "mid_price": 23859.9,
+          "bid_depth_5": 845,
+          "ask_depth_5": 975,
+          "depth_imbalance": -0.07142857142857142,
+          "spot_symbol": "NIFTY 50",
+          "spot": 23779.15,
+          "spot_as_of": "2026-09-07T15:34:48+00:00",
+          "futures_as_of": "2026-09-07T15:34:47+00:00",
+          "data_age_seconds": 1.0,
+          "basis": 83.14999999999782,
+          "basis_pct": 0.34967608177751436,
+          "basis_status": "fresh",
+          "price_oi": {
+            "label": "neutral",
+            "pattern": "unchanged",
+            "kind": "inferred",
+            "note": "Descriptive market-structure label, not a position or identity claim."
+          },
+          "kind": "observed+derived+inferred",
+          "data_state": {
+            "market_state": "closed",
+            "data_status": "last_session",
+            "as_of": "2026-09-07T21:04:47+05:30",
+            "session_date": "2026-09-07",
+            "source": "latest_quotes",
+            "reason": "market_closed"
+          }
+        },
+        {
+          "symbol": "NIFTY26OCTFUT",
+          "underlying": "NIFTY",
+          "expiry": "2026-10-27",
+          "lot_size": 65,
+          "tick_size": 0.1,
+          "ltp": 23961.0,
+          "price_change": 0.0,
+          "price_change_pct": 0.0,
+          "volume": 346060,
+          "volume_delta": 0,
+          "oi": 1975740,
+          "oi_change": 0.0,
+          "oi_change_pct": 0.0,
+          "last_quantity": 65,
+          "best_bid": 23961.0,
+          "best_ask": 23970.0,
+          "spread": 9.0,
+          "mid_price": 23965.5,
+          "bid_depth_5": 2665,
+          "ask_depth_5": 2405,
+          "depth_imbalance": 0.05128205128205128,
+          "spot_symbol": "NIFTY 50",
+          "spot": 23779.15,
+          "spot_as_of": "2026-09-07T15:34:48+00:00",
+          "futures_as_of": "2026-09-07T15:34:47+00:00",
+          "data_age_seconds": 1.0,
+          "basis": 181.84999999999854,
+          "basis_pct": 0.7647455859439826,
+          "basis_status": "fresh",
+          "price_oi": {
+            "label": "neutral",
+            "pattern": "unchanged",
+            "kind": "inferred",
+            "note": "Descriptive market-structure label, not a position or identity claim."
+          },
+          "kind": "observed+derived+inferred",
+          "data_state": {
+            "market_state": "closed",
+            "data_status": "last_session",
+            "as_of": "2026-09-07T21:04:47+05:30",
+            "session_date": "2026-09-07",
+            "source": "latest_quotes",
+            "reason": "market_closed"
+          }
+        }
+      ],
+      "found": true,
+      "kind": "derived",
+      "data_state": {
+        "market_state": "closed",
+        "data_status": "last_session",
+        "as_of": "2026-09-07T21:04:48+05:30",
+        "session_date": "2026-09-07",
+        "source": "latest_quotes",
+        "reason": "market_closed"
+      }
+    },
+    "data_state": {
+      "market_state": "closed",
+      "data_status": "last_session",
+      "as_of": "2026-09-07T21:04:48+05:30",
+      "session_date": "2026-09-07",
+      "source": "latest_quotes",
+      "reason": "market_closed"
+    }
+  }
+}

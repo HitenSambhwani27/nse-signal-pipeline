@@ -65,8 +65,8 @@ def main() -> int:
     )
     if needs_refresh:
         print(
-            "Membership/instrument cache missing, stale, or holding expired "
-            "derivatives — refreshing via Kite instrument master..."
+            "Membership/instrument cache missing, stale, schema-stale, or holding "
+            "expired derivatives — refreshing via Kite instrument master..."
         )
         try:
             cache = refresh_instrument_cache(kite, settings, force_membership=True)
@@ -79,7 +79,13 @@ def main() -> int:
             )
         except Exception as exc:
             print(f"Startup membership refresh failed: {exc}")
-            return 1
+            if cache_exists and cache is not None:
+                print(
+                    "Continuing with the existing instrument cache. "
+                    "Market-data ingest is not blocked on a cache rebuild."
+                )
+            else:
+                return 1
 
     service = WebSocketIngestionService(settings=settings, kite=kite)
     print(

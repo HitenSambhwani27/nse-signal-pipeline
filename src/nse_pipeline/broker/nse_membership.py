@@ -192,3 +192,23 @@ def refresh_membership(
         len(quote_only),
     )
     return snapshot
+
+
+def load_sector_map(settings: Settings) -> dict[str, str]:
+    """Industry column from the NSE constituent CSVs. Empty if files are missing."""
+    mapping: dict[str, str] = {}
+    for filename in ("ind_nifty500list.csv", "ind_nifty100list.csv"):
+        path = settings.paths.membership_dir / filename
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except OSError:
+            continue
+        reader = csv.DictReader(io.StringIO(text))
+        for row in reader:
+            symbol = (row.get("Symbol") or row.get("symbol") or "").strip().upper()
+            industry = (row.get("Industry") or row.get("industry") or "").strip()
+            if symbol and industry and symbol not in mapping:
+                mapping[symbol] = industry
+    return mapping

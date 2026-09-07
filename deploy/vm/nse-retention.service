@@ -1,0 +1,13 @@
+[Unit]
+Description=NSE retention planner (dry-run unless ExecStart is given --apply)
+
+[Service]
+Type=oneshot
+User=nse
+Group=nse
+WorkingDirectory=/home/nse/nse-signal-pipeline
+Environment=PYTHONPATH=src
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/nse/nse-signal-pipeline/.env
+ExecStart=/home/nse/nse-signal-pipeline/.venv/bin/python scripts/15_run_retention.py
+Nice=10

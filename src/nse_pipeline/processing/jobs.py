@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from nse_pipeline.account.capture import capture_once
+from nse_pipeline.broker.session import TokenState, classify_exception
 from nse_pipeline.config import Settings
 from nse_pipeline.decisions.link import log_decision
 from nse_pipeline.features.batch import run_feature_batch
@@ -81,8 +82,15 @@ class ExistingAccountCapture:
             )
             return result
         except Exception as exc:
+            token_state = classify_exception(exc)
+            status = "auth_invalid" if token_state == TokenState.INVALID else "error"
             store.upsert_processing_status(
-                "account", status="error", details={"error": str(exc)}
+                "account",
+                status=status,
+                details={
+                    "error": str(exc),
+                    "token_state": token_state.value if token_state else None,
+                },
             )
             raise
 

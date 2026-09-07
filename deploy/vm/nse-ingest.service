@@ -1,0 +1,26 @@
+[Unit]
+Description=NSE live websocket ingest (exactly one Kite market-data process)
+After=network-online.target
+Wants=network-online.target
+# Do not start this unit while a manual nohup ingest is already running.
+# Cut over only with deploy/vm/cutover_ingest_to_systemd.sh after market close
+# or after confirming the manual process has stopped.
+
+[Service]
+Type=simple
+User=nse
+Group=nse
+WorkingDirectory=/home/nse/nse-signal-pipeline
+Environment=PYTHONPATH=src
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/nse/nse-signal-pipeline/.env
+ExecStart=/home/nse/nse-signal-pipeline/.venv/bin/python scripts/01_run_ingestion.py
+KillSignal=SIGTERM
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=30
+StartLimitBurst=5
+StartLimitIntervalSec=600
+
+[Install]
+WantedBy=multi-user.target

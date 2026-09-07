@@ -1,0 +1,143 @@
+{
+  "http_status": 200,
+  "path": "/api/v1/quotes/HDFCBANK",
+  "payload": {
+    "maturity": {
+      "equity": {
+        "class_key": "equity",
+        "underlying": null,
+        "tier": "suppressed",
+        "pooled_live_days": 4,
+        "threshold_days": 60,
+        "suppress_below_days": 10,
+        "display": "insufficient data, 4/60 pooled days",
+        "probability_permitted": false,
+        "reason": "no_harness_passed_model"
+      },
+      "futures": {
+        "class_key": "futures",
+        "underlying": null,
+        "tier": "suppressed",
+        "pooled_live_days": 4,
+        "threshold_days": 60,
+        "suppress_below_days": 10,
+        "display": "insufficient data, 4/60 pooled days",
+        "probability_permitted": false,
+        "reason": "no_harness_passed_model"
+      },
+      "options_nifty": {
+        "class_key": "options",
+        "underlying": "NIFTY",
+        "tier": "suppressed",
+        "pooled_live_days": 1,
+        "threshold_days": 60,
+        "suppress_below_days": 10,
+        "display": "insufficient data, 1/60 pooled days",
+        "probability_permitted": false,
+        "reason": "no_harness_passed_model",
+        "note": "Cumulative trading days across the rolling contract sequence, not per individual weekly/monthly contract."
+      },
+      "options_banknifty": {
+        "class_key": "options",
+        "underlying": "BANKNIFTY",
+        "tier": "suppressed",
+        "pooled_live_days": 1,
+        "threshold_days": 60,
+        "suppress_below_days": 10,
+        "display": "insufficient data, 1/60 pooled days",
+        "probability_permitted": false,
+        "reason": "no_harness_passed_model",
+        "note": "Cumulative trading days across the rolling contract sequence, not per individual weekly/monthly contract."
+      }
+    },
+    "as_of": "2026-09-07T10:04:49.427816+00:00",
+    "subsystems": {
+      "options": {
+        "status": "OK",
+        "reason": null
+      },
+      "futures": {
+        "status": "OK",
+        "reason": null
+      },
+      "activity": {
+        "status": "OK",
+        "reason": null
+      },
+      "intelligence": {
+        "status": "NOT_MATURE",
+        "reason": "maturity_gate"
+      },
+      "charts": {
+        "status": "OK",
+        "reason": null
+      }
+    },
+    "found": true,
+    "quote": {
+      "symbol": "HDFCBANK",
+      "instrument_token": "<redacted>",
+      "exchange": "NSE",
+      "timestamp": "2026-09-07T15:34:05+00:00",
+      "last_price": 710.5,
+      "change": 0.0,
+      "volume": 12167496,
+      "volume_delta": 0,
+      "oi": 0,
+      "oi_change": 0,
+      "last_quantity": 10,
+      "best_bid": null,
+      "best_ask": null,
+      "spread": null,
+      "mid_price": null,
+      "buy_quantity": 0,
+      "sell_quantity": 0,
+      "bid_depth_5": 0,
+      "ask_depth_5": 0,
+      "depth_imbalance": null,
+      "instrument_type": "EQ",
+      "underlying": "HDFC BANK",
+      "expiry": null,
+      "strike": null,
+      "lot_size": 1,
+      "tick_size": 0.05,
+      "subscribe_mode": "full",
+      "change_pct": 0.0,
+      "average_price": 710.43,
+      "ohlc": {
+        "open": 712.1,
+        "high": 713.0,
+        "low": 707.05,
+        "close": 712.1
+      },
+      "oi_change_pct": null,
+      "best_bid_quantity": null,
+      "best_ask_quantity": null,
+      "displayed_bid_quantity": 0,
+      "displayed_ask_quantity": 0,
+      "exchange_timestamp": "2026-09-07T15:34:05+00:00",
+      "last_trade_time": "2026-09-07T15:29:58+00:00",
+      "ingested_at": "2026-09-07T10:04:06.098474+00:00",
+      "missing_fields": [
+        "depth"
+      ],
+      "kind": "observed+derived",
+      "data_state": {
+        "market_state": "closed",
+        "data_status": "last_session",
+        "as_of": "2026-09-07T21:04:05+05:30",
+        "session_date": "2026-09-07",
+        "source": "latest_quotes",
+        "reason": "market_closed"
+      }
+    },
+    "data_state": {
+      "market_state": "closed",
+      "data_status": "last_session",
+      "as_of": "2026-09-07T21:04:05+05:30",
+      "session_date": "2026-09-07",
+      "source": "latest_quotes",
+      "reason": "market_closed"
+    }
+  }
+}

@@ -17,11 +17,16 @@ from typing import Any
 
 from kiteconnect import KiteConnect
 
-from nse_pipeline.broker.nse_membership import refresh_membership
+from nse_pipeline.broker.nse_membership import load_sector_map, refresh_membership
 from nse_pipeline.broker.option_series import filter_rows_by_series
 from nse_pipeline.config import OptionUnderlyingSettings, Settings
+from nse_pipeline.market.cache_health import (
+    CACHE_SCHEMA_VERSION,
+    durable_instrument_key,
+)
 from nse_pipeline.market.universe import (
     allocate_stock_option_slots,
+    atm_strike,
     collect_stock_option_slots,
     current_and_next_expiries,
     fo_names_from_nfo_rows,
@@ -582,19 +587,31 @@ def refresh_instrument_cache(
 
     all_options = options + stock_options
     all_futures = futures + stock_futures
+    sectors = load_sector_map(settings)
 
     payload: dict[str, Any] = {
+        "schema_version": CACHE_SCHEMA_VERSION,
         "updated_at": datetime.utcnow().isoformat() + "Z",
         "membership": membership.to_dict(),
         "equity_depth": {
-            symbol: info.to_cache_dict() for symbol, info in depth_equities.items()
+            symbol: _cache_dict(
+                info,
+                sector=sectors.get(symbol.upper()),
+                indices=_index_tags(symbol, membership),
+            )
+            for symbol, info in depth_equities.items()
         },
         "equity_quote": {
-            symbol: info.to_cache_dict() for symbol, info in quote_equities.items()
+            symbol: _cache_dict(
+                info,
+                sector=sectors.get(symbol.upper()),
+                indices=_index_tags(symbol, membership),
+            )
+            for symbol, info in quote_equities.items()
         },
-        "index": {symbol: info.to_cache_dict() for symbol, info in indices.items()},
-        "options": [info.to_cache_dict() for info in all_options],
-        "futures": [info.to_cache_dict() for info in all_futures],
+        "index": {symbol: _cache_dict(info) for symbol, info in indices.items()},
+        "options": [_cache_dict(info) for info in all_options],
+        "futures": [_cache_dict(info) for info in all_futures],
         "fo_eligible_nifty100": fo_eligible,
         "universe": {
             "configured_index_options": [u.name for u in settings.options.underlyings],
@@ -668,6 +685,40 @@ def refresh_instrument_cache(
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     cache_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return payload
+
+
+def _cache_dict(
+    info: InstrumentInfo,
+    *,
+    sector: str | None = None,
+    indices: list[str] | None = None,
+) -> dict[str, Any]:
+    payload = info.to_cache_dict()
+    payload["durable_key"] = durable_instrument_key(
+        exchange=info.exchange,
+        tradingsymbol=info.tradingsymbol,
+        name=info.name,
+        instrument_type=info.instrument_type,
+        expiry=info.expiry,
+        strike=info.strike,
+    )
+    if sector:
+        payload["sector"] = sector
+    if indices:
+        payload["indices"] = indices
+    return payload
+
+
+def _index_tags(symbol: str, membership: Any) -> list[str]:
+    tags: list[str] = []
+    nifty100 = {str(s).upper() for s in (getattr(membership, "nifty100", None) or [])}
+    nifty500 = {str(s).upper() for s in (getattr(membership, "nifty500", None) or [])}
+    key = symbol.upper()
+    if key in nifty100:
+        tags.append("NIFTY100")
+    if key in nifty500:
+        tags.append("NIFTY500")
+    return tags
 
 
 def load_instrument_cache(cache_path: Path) -> dict[str, Any]:

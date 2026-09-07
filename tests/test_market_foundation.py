@@ -346,6 +346,7 @@ def test_eq_fut_ce_pe_metadata_roundtrip() -> None:
 def test_instrument_cache_health_and_coverage() -> None:
     cache = {
         "updated_at": "2026-08-15T10:00:00Z",
+        "schema_version": 1,
         "counts": {"options": 2, "futures": 1},
         "equity_depth": {"RELIANCE": {"tradingsymbol": "RELIANCE", "instrument_type": "EQ"}},
         "equity_quote": {},
@@ -388,6 +389,16 @@ def test_instrument_cache_health_and_coverage() -> None:
     assert coverage["nifty_option_ce"] == 1
     assert lookup_instrument_meta(cache, "NIFTY2581824850CE")["instrument_type"] == "CE"
     assert lookup_instrument_meta(cache, "reliance")["tradingsymbol"] == "RELIANCE"
+
+
+def test_instrument_cache_missing_schema_version_is_schema_stale() -> None:
+    health = instrument_cache_health(
+        {"updated_at": "2026-09-04T05:13:00Z", "options": [], "futures": []},
+        today=datetime(2026, 9, 7).date(),
+    )
+    assert health["status"] == "schema_stale"
+    assert health["schema_ok"] is False
+    assert health["needs_refresh"] is True
 
 
 def test_consecutive_snapshots_preserve_inputs_for_later_depth_diff() -> None:

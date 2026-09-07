@@ -55,6 +55,8 @@ def test_api_v1_envelope_and_null_probability(tmp_path: Path) -> None:
         payload = client.get(path).json()
         assert "maturity" in payload
         assert "as_of" in payload
+        assert "subsystems" in payload
+        assert payload["subsystems"]["intelligence"]["status"] == "NOT_MATURE"
         eq = payload["maturity"]["equity"]
         assert eq["display"] == "insufficient data, 1/60 pooled days"
         assert eq["probability_permitted"] is False
@@ -79,6 +81,17 @@ def test_api_v1_envelope_and_null_probability(tmp_path: Path) -> None:
     assert health["health"]["database"] == "ok"
     assert health["health"]["processing_lag"] == "unknown"
     assert health["health"]["instrument_cache"]["status"] == "unknown"
+    assert "disk_free_gb" in health["health"]
+    assert "sessions_of_headroom" in health["health"]
+    assert health["health"]["kite_token_state"] in {
+        "valid",
+        "expiring",
+        "invalid",
+        "reauthenticated",
+        "missing",
+        "unknown",
+    }
+    assert health["subsystems"]["intelligence"]["status"] == "NOT_MATURE"
     missing = client.get("/api/v1/quotes/RELIANCE").json()
     assert missing["found"] is False
     assert missing["quote"] is None
@@ -186,6 +199,7 @@ def test_quotes_endpoint_serializes_latest_state(tmp_path: Path) -> None:
         json.dumps(
             {
                 "updated_at": "2026-09-01T00:00:00Z",
+                "schema_version": 1,
                 "equity_depth": {
                     "RELIANCE": {
                         "instrument_token": 738561,

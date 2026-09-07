@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import unquote
 
+from nse_pipeline.api.contracts import default_subsystems, intelligence_status
+from nse_pipeline.broker.session import public_token_status, token_present
 from nse_pipeline.config import Settings
 from nse_pipeline.market.assemble import (
     assemble_charts,
@@ -25,6 +27,7 @@ from nse_pipeline.signals.maturity import (
     maturity_snapshot,
     signal_public_view,
 )
+from nse_pipeline.storage.retention import disk_stats
 from nse_pipeline.storage.sqlite_store import SQLiteStore
 
 MATURITY_CACHE_TTL_S = 30.0
@@ -70,7 +73,15 @@ class SqliteUiReadModel:
 
     def _envelope(self, **payload: Any) -> dict[str, Any]:
         """`as_of` stays the response time; `data_state.as_of` is the data time."""
-        return {"maturity": self._maturity(), "as_of": _as_of(), **payload}
+        maturity = self._maturity()
+        subsystems = default_subsystems()
+        subsystems["intelligence"] = intelligence_status(maturity)
+        return {
+            "maturity": maturity,
+            "as_of": _as_of(),
+            "subsystems": subsystems,
+            **payload,
+        }
 
     def _state_of(self, payload: dict[str, Any] | None, symbol: str | None = None) -> dict[str, Any]:
         state = (payload or {}).get("data_state")
@@ -119,6 +130,8 @@ class SqliteUiReadModel:
         blob.setdefault("database", "ok")
         blob.setdefault("processing_lag", "unknown")
         blob["instrument_cache"] = self._instrument_cache_health()
+        blob.update(self._disk_health())
+        blob.update(self._token_health(blob))
         return self._envelope(health=blob, data_state=self.policy.overall_state().to_dict())
 
     def quote(self, symbol: str) -> dict[str, Any]:
@@ -339,3 +352,50 @@ class SqliteUiReadModel:
         if cache is None:
             return {"status": "unknown", "reason": "cache_file_missing"}
         return instrument_cache_health(cache)
+
+    def _disk_health(self) -> dict[str, Any]:
+        estimate = int(self.settings.retention.raw_bytes_per_session_estimate)
+        free_gb, headroom = disk_stats(
+            self.settings.paths.data_dir, raw_bytes_per_session=estimate
+        )
+        warning = headroom is not None and headroom < 10
+        return {
+            "disk_free_gb": free_gb,
+            "sessions_of_headroom": headroom,
+            "disk_warning": warning,
+        }
+
+    def _token_health(self, blob: dict[str, Any]) -> dict[str, Any]:
+        """Infer token state from observed processes. Does not call Kite."""
+        account = (blob.get("processing_status") or {}).get("account") or {}
+        ingest = blob.get("last_ingestion_meta") or {}
+        latest_ts = self.store.latest_quote_max_ingested_at() or self.store.latest_quote_max_timestamp()
+        ingest_fresh = _timestamp_fresh(latest_ts) or _timestamp_fresh(ingest.get("timestamp"))
+        status = public_token_status(
+            access_token_present=token_present(self.settings.kite.access_token),
+            last_account_status=account.get("status"),
+            last_account_error=str((account.get("details") or {}).get("error") or "") or None,
+            last_ingest_event=ingest.get("event_type"),
+            ingest_fresh=ingest_fresh,
+        )
+        return {
+            "kite_token_state": status["kite_token_state"],
+            "kite_token_age_seconds": None,
+            "kite_last_auth_at": account.get("updated_at") or account.get("last_timestamp"),
+            "account_capture_status": account.get("status"),
+            "ingest_fresh": ingest_fresh,
+        }
+
+
+def _timestamp_fresh(value: str | None, *, max_age_seconds: float = 180.0) -> bool:
+    if not value:
+        return False
+    try:
+        ts = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - ts.astimezone(timezone.utc)).total_seconds()
+    return 0.0 <= age <= max_age_seconds
+

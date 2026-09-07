@@ -2,6 +2,8 @@
 Description=NSE Kite account/order REST capture (does not place orders)
 After=network-online.target
 Wants=network-online.target
+# TokenException is expected when the daily access token expires. The process
+# stays alive and backs off internally; systemd must not hot-loop.
 
 [Service]
 Type=simple
@@ -13,7 +15,9 @@ Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-/home/nse/nse-signal-pipeline/.env
 ExecStart=/home/nse/nse-signal-pipeline/.venv/bin/python scripts/12_run_account_capture.py --poll-seconds 30
 Restart=on-failure
-RestartSec=30
+RestartSec=300
+StartLimitBurst=3
+StartLimitIntervalSec=1800
 
 [Install]
 WantedBy=multi-user.target

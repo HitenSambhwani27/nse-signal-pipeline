@@ -5,6 +5,33 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
+# Bump when the on-disk instruments_cache.json shape changes. Ingest startup
+# treats a missing/older version as needs_refresh. Never copy a local-PC cache
+# onto the VM to "fix" a mismatch — rebuild from the Kite master instead.
+CACHE_SCHEMA_VERSION = 1
+
+
+def durable_instrument_key(
+    *,
+    exchange: str | None,
+    tradingsymbol: str | None,
+    name: str | None = None,
+    instrument_type: str | None = None,
+    expiry: str | None = None,
+    strike: float | None = None,
+) -> str:
+    """Stable identity for persisted UI state. Never key user state on tokens."""
+    exch = (exchange or "NSE").upper()
+    kind = (instrument_type or "").upper()
+    symbol = (tradingsymbol or "").upper()
+    underlying = (name or tradingsymbol or "").upper()
+    if kind in {"CE", "PE"}:
+        strike_s = "" if strike is None else f"{float(strike):g}"
+        return f"{exch}:{underlying}:{kind}:{expiry or ''}:{strike_s}"
+    if kind == "FUT":
+        return f"{exch}:{underlying}:FUT:{expiry or ''}"
+    return f"{exch}:{symbol}"
+
 
 def _parse_expiry(value: Any) -> date | None:
     if value is None:
@@ -56,11 +83,20 @@ def instrument_cache_health(
         or missing_next_options
         or missing_next_futures
     )
+    schema_version = cache.get("schema_version")
+    schema_ok = schema_version == CACHE_SCHEMA_VERSION
+    if not schema_ok:
+        needs_refresh = True
     status = "ok"
-    if needs_refresh:
+    if not schema_ok:
+        status = "schema_stale"
+    elif needs_refresh:
         status = "stale_expiries"
     return {
         "updated_at": cache.get("updated_at"),
+        "schema_version": schema_version,
+        "schema_ok": schema_ok,
+        "expected_schema_version": CACHE_SCHEMA_VERSION,
         "counts": cache.get("counts") or {},
         "expired_option_count": len(expired_options),
         "expired_future_count": len(expired_futures),
