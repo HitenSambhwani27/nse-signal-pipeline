@@ -104,7 +104,7 @@ ssh_cmd() {
 
 http_code() {
   local url="$1"
-  ssh_cmd "curl -sS -o /tmp/nse_deploy_body.json -w '%{http_code}' --max-time 15 '${url}'"
+  ssh_cmd "curl -sS -o /tmp/nse_deploy_body.json -w '%{http_code}' --max-time 90 '${url}'"
 }
 
 echo "============================================================"
