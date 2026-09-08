@@ -2,9 +2,10 @@
 Description=NSE live websocket ingest (exactly one Kite market-data process)
 After=network-online.target
 Wants=network-online.target
+# Started by nse-ingest.timer (Mon-Fri 08:45 machine TZ) and on boot (WantedBy).
+# Clean SIGTERM exits 0; Restart=on-failure does not loop on a clean stop.
+# The timer brings the unit back for the next weekday session.
 # Do not start this unit while a manual nohup ingest is already running.
-# Cut over only with deploy/vm/cutover_ingest_to_systemd.sh after market close
-# or after confirming the manual process has stopped.
 
 [Service]
 Type=simple
@@ -21,6 +22,7 @@ Restart=on-failure
 RestartSec=30
 StartLimitBurst=5
 StartLimitIntervalSec=600
+SyslogIdentifier=nse-ingest
 
 [Install]
 WantedBy=multi-user.target

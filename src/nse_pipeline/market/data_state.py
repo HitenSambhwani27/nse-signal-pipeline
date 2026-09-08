@@ -11,10 +11,9 @@ A row existing in latest_quotes is never on its own enough to claim "live";
 freshness against the session clock decides. Historical observations keep their
 own timestamp — wall-clock time is never substituted for as_of.
 
-Session bounds come from the existing SessionSettings / session_coverage logic.
-NSE trading holidays are not modelled anywhere in this repository, so on a
-holiday the clock still reports "open" during session hours; the freshness check
-then downgrades data_status to last_session, which is the honest answer.
+Session bounds come from SessionSettings plus the backend calendar clock.
+NSE holidays are not seeded; the clock never claims holiday until a published
+list exists. Weekends are weekend, not a silent closed weekday.
 """
 
 from __future__ import annotations
@@ -25,11 +24,28 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from nse_pipeline.config import SessionSettings
+from nse_pipeline.market.calendar import (
+    CLOSED,
+    OPEN,
+    POST_CLOSE,
+    PRE_OPEN,
+    WEEKEND,
+    cash_session_open,
+    session_clock,
+)
 from nse_pipeline.market.futures_analytics import parse_observation_ts
-from nse_pipeline.session_coverage import expected_bounds
+from nse_pipeline.market.timestamps import (
+    AMBIGUOUS_UTC_HOUR,
+    canonical_observation,
+    is_fresh_age,
+    observation_age_seconds as canonical_age_seconds,
+)
 
-MARKET_OPEN = "open"
-MARKET_CLOSED = "closed"
+MARKET_OPEN = OPEN
+MARKET_CLOSED = CLOSED
+MARKET_PRE_OPEN = PRE_OPEN
+MARKET_POST_CLOSE = POST_CLOSE
+MARKET_WEEKEND = WEEKEND
 
 STATUS_LIVE = "live"
 STATUS_LAST_SESSION = "last_session"
@@ -70,41 +86,61 @@ class DataState:
 
 
 def market_state(session: SessionSettings, *, now: datetime | None = None) -> str:
-    """"open" inside the weekday cash session in the configured timezone."""
-    tz = ZoneInfo(session.timezone)
-    moment = (now or datetime.now(timezone.utc)).astimezone(tz)
-    if moment.weekday() >= 5:
-        return MARKET_CLOSED
-    open_dt, _open_deadline, _close_earliest, close_dt = expected_bounds(
-        moment.date().isoformat(), session
-    )
-    return MARKET_OPEN if open_dt <= moment <= close_dt else MARKET_CLOSED
+    """Session clock: pre_open / open / post_close / closed / weekend.
+
+    Holidays are not claimed until an NSE holiday list is seeded.
+    """
+    return session_clock(session, now=now)
 
 
-def observation_age_seconds(value: Any, *, now: datetime | None = None) -> float | None:
+def observation_age_seconds(
+    value: Any,
+    *,
+    now: datetime | None = None,
+    ingested_at: Any = None,
+) -> float | None:
     """Age of a real observation. Returns None when the stamp is unusable."""
-    stamp = parse_observation_ts(value)
-    if stamp is None:
+    age, repair = canonical_age_seconds(value, now=now, ingested_at=ingested_at)
+    if repair == AMBIGUOUS_UTC_HOUR:
         return None
-    moment = now or datetime.now(timezone.utc)
-    return (moment - stamp).total_seconds()
+    return age
 
 
-def is_fresh(value: Any, *, max_age_seconds: float, now: datetime | None = None) -> bool:
-    age = observation_age_seconds(value, now=now)
-    return age is not None and age <= float(max_age_seconds)
+def is_fresh(
+    value: Any,
+    *,
+    max_age_seconds: float,
+    now: datetime | None = None,
+    ingested_at: Any = None,
+) -> bool:
+    age = observation_age_seconds(value, now=now, ingested_at=ingested_at)
+    return is_fresh_age(age, max_age_seconds=max_age_seconds)
 
 
-def session_iso(value: Any, session: SessionSettings) -> str | None:
+def session_iso(
+    value: Any,
+    session: SessionSettings,
+    *,
+    ingested_at: Any = None,
+) -> str | None:
     """Same instant, rendered in the session timezone. Never rewritten to now."""
-    stamp = parse_observation_ts(value)
+    stamp, repair = canonical_observation(value, ingested_at=ingested_at)
+    if stamp is None or repair == AMBIGUOUS_UTC_HOUR:
+        stamp = parse_observation_ts(value)
     if stamp is None:
         return None
     return stamp.astimezone(ZoneInfo(session.timezone)).isoformat()
 
 
-def session_date_of(value: Any, session: SessionSettings) -> str | None:
-    stamp = parse_observation_ts(value)
+def session_date_of(
+    value: Any,
+    session: SessionSettings,
+    *,
+    ingested_at: Any = None,
+) -> str | None:
+    stamp, repair = canonical_observation(value, ingested_at=ingested_at)
+    if stamp is None or repair == AMBIGUOUS_UTC_HOUR:
+        stamp = parse_observation_ts(value)
     if stamp is None:
         return None
     return stamp.astimezone(ZoneInfo(session.timezone)).date().isoformat()
@@ -127,6 +163,8 @@ def resolve(
     live_timestamp: Any = None,
     historical_timestamp: Any = None,
     historical_source: str | None = None,
+    live_ingested_at: Any = None,
+    historical_ingested_at: Any = None,
     max_age_seconds: float,
     now: datetime | None = None,
 ) -> tuple[str, DataState]:
@@ -137,16 +175,28 @@ def resolve(
     """
     moment = now or datetime.now(timezone.utc)
     clock = market_state(session, now=moment)
-    live_ts = parse_observation_ts(live_timestamp)
-    hist_ts = parse_observation_ts(historical_timestamp)
-    live_fresh = live_ts is not None and (moment - live_ts).total_seconds() <= float(max_age_seconds)
+    live_obs, live_repair = canonical_observation(live_timestamp, ingested_at=live_ingested_at)
+    hist_obs, hist_repair = canonical_observation(
+        historical_timestamp, ingested_at=historical_ingested_at
+    )
+    live_ts = live_obs
+    hist_ts = hist_obs
+    if live_ts is None and live_repair != AMBIGUOUS_UTC_HOUR:
+        live_ts = parse_observation_ts(live_timestamp)
+    if hist_ts is None and hist_repair != AMBIGUOUS_UTC_HOUR:
+        hist_ts = parse_observation_ts(historical_timestamp)
+    if live_repair == AMBIGUOUS_UTC_HOUR:
+        live_fresh = False
+    else:
+        live_age = None if live_ts is None else (moment - live_ts).total_seconds()
+        live_fresh = is_fresh_age(live_age, max_age_seconds=max_age_seconds)
 
-    if live_fresh and clock == MARKET_OPEN:
+    if live_fresh and cash_session_open(clock):
         return CHOICE_LIVE, DataState(
             market_state=clock,
             data_status=STATUS_LIVE,
-            as_of=session_iso(live_ts, session),
-            session_date=session_date_of(live_ts, session),
+            as_of=session_iso(live_ts, session, ingested_at=live_ingested_at),
+            session_date=session_date_of(live_ts, session, ingested_at=live_ingested_at),
             source=SOURCE_LATEST_QUOTES,
         )
 
@@ -170,7 +220,7 @@ def resolve(
         stamp = live_ts
         source = SOURCE_LATEST_QUOTES
 
-    if clock == MARKET_CLOSED:
+    if not cash_session_open(clock):
         reason = "market_closed"
     elif live_ts is None:
         reason = "live_snapshot_missing"
@@ -180,8 +230,12 @@ def resolve(
     return choice, DataState(
         market_state=clock,
         data_status=STATUS_LAST_SESSION,
-        as_of=session_iso(stamp, session),
-        session_date=session_date_of(stamp, session),
+        as_of=session_iso(stamp, session, ingested_at=live_ingested_at if choice != CHOICE_HISTORICAL else historical_ingested_at),
+        session_date=session_date_of(
+            stamp,
+            session,
+            ingested_at=live_ingested_at if choice != CHOICE_HISTORICAL else historical_ingested_at,
+        ),
         source=source,
         reason=reason,
     )

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from nse_pipeline.market.latest import public_quote
+from nse_pipeline.market.reference import resolve_reference
 
 
 def _ratio(numer: float | None, denom: float | None) -> float | None:
@@ -18,6 +19,8 @@ def enrich_quote(row: dict[str, Any], *, meta: dict[str, Any] | None = None) -> 
     last = row.get("last_price")
     prev_close = row.get("ohlc_close")
     change = dto.get("change")
+    # Legacy change_pct uses tick price_delta vs ohlc_close. Canonical day-change
+    # is change_absolute / change_percent from resolve_reference below.
     change_pct = None
     if change is not None and prev_close not in (None, 0):
         change_pct = _ratio(float(change), float(prev_close))
@@ -51,6 +54,12 @@ def enrich_quote(row: dict[str, Any], *, meta: dict[str, Any] | None = None) -> 
             "missing_fields": missing_quote_fields(row),
             "kind": "observed+derived",
         }
+    )
+    dto.update(
+        resolve_reference(
+            row,
+            instrument_type=(meta or {}).get("instrument_type") or row.get("instrument_type"),
+        )
     )
     return dto
 

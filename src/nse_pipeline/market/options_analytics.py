@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 from nse_pipeline.market.implied_vol import implied_volatility
+from nse_pipeline.market.reference import resolve_reference
 from nse_pipeline.market.universe import atm_strike, infer_strike_interval, moneyness, strike_window
 
 
@@ -198,6 +199,7 @@ def _side_from_quote(
         "iv_rate": iv_row.get("iv_rate"),
         "iv_dividend_yield": iv_row.get("iv_dividend_yield"),
         "iv_exercise_style": iv_row.get("iv_exercise_style"),
+        **resolve_reference(q, instrument_type=meta.get("instrument_type")),
     }
 
 

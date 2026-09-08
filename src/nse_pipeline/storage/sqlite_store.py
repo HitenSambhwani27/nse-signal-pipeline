@@ -16,6 +16,13 @@ from typing import Any, Generator, Iterable
 
 import pandas as pd
 
+from nse_pipeline.market.timestamps import (
+    AMBIGUOUS_UTC_HOUR,
+    canonical_observation,
+    canonicalize_row,
+    parse_instant,
+)
+
 
 def _ts_iso(ts: Any) -> str:
     t = pd.Timestamp(ts)
@@ -313,6 +320,33 @@ CREATE TABLE IF NOT EXISTS watchlist_symbols (
     symbol TEXT NOT NULL,
     PRIMARY KEY (watchlist_id, symbol),
     FOREIGN KEY (watchlist_id) REFERENCES watchlists(id)
+);
+
+CREATE TABLE IF NOT EXISTS market_calendar (
+    session_date TEXT NOT NULL,
+    segment TEXT NOT NULL DEFAULT 'CASH',
+    is_trading_day INTEGER NOT NULL,
+    session_type TEXT NOT NULL,
+    pre_open_start TEXT,
+    pre_open_end TEXT,
+    open_time TEXT,
+    close_time TEXT,
+    post_close_end TEXT,
+    is_expiry INTEGER NOT NULL DEFAULT 0,
+    holiday_reason TEXT,
+    source TEXT NOT NULL,
+    source_version TEXT NOT NULL,
+    PRIMARY KEY (session_date, segment)
+);
+
+CREATE TABLE IF NOT EXISTS session_reference (
+    session_date TEXT NOT NULL,
+    instrument_key TEXT NOT NULL,
+    reference_type TEXT NOT NULL,
+    reference_price REAL,
+    settlement_price REAL,
+    source TEXT,
+    PRIMARY KEY (session_date, instrument_key)
 );
 """
 
@@ -965,14 +999,19 @@ class SQLiteStore:
                 """,
                 (wanted,),
             ).fetchone()
-        return dict(row) if row else None
+        return canonicalize_row(dict(row)) if row else None
 
     def latest_quote_max_timestamp(self) -> str | None:
         """Newest observation timestamp in latest_quotes, without loading rows."""
         with self.connection() as conn:
             row = conn.execute("SELECT max(timestamp) FROM latest_quotes").fetchone()
         value = None if row is None else row[0]
-        return str(value) if value else None
+        if not value:
+            return None
+        observed, repair = canonical_observation(value, ingested_at=None)
+        if observed is None or repair == AMBIGUOUS_UTC_HOUR:
+            return str(value)
+        return observed.isoformat()
 
     def latest_quote_max_ingested_at(self) -> str | None:
         with self.connection() as conn:
@@ -980,10 +1019,118 @@ class SQLiteStore:
         value = None if row is None else row[0]
         return str(value) if value else None
 
+    def latest_quotes_observation_stats(self) -> dict[str, Any]:
+        """Small-table scan of latest_quotes only. Never walks activity/history tables."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT timestamp, ingested_at FROM latest_quotes"
+            ).fetchall()
+        timestamps: list[datetime] = []
+        ingested: list[datetime] = []
+        skews: list[float] = []
+        for row in rows:
+            item = dict(row)
+            ts = item.get("timestamp")
+            ing = item.get("ingested_at")
+            observed, repair = canonical_observation(ts, ingested_at=ing)
+            received = parse_instant(ing)
+            if observed is not None and repair != AMBIGUOUS_UTC_HOUR:
+                timestamps.append(observed)
+            if received is not None:
+                ingested.append(received)
+            if observed is not None and received is not None and repair != AMBIGUOUS_UTC_HOUR:
+                skews.append((received - observed).total_seconds())
+        return {
+            "count": len(rows),
+            "max_timestamp": max(timestamps).isoformat() if timestamps else None,
+            "max_ingested_at": max(ingested).isoformat() if ingested else None,
+            "clock_skew_seconds": _median(skews),
+            "clock_skew_clocks": "ingested_at - observed_at",
+        }
+
+    def activity_samples_max_timestamp(self) -> str | None:
+        with self.connection() as conn:
+            row = conn.execute("SELECT max(timestamp) FROM activity_samples").fetchone()
+        value = None if row is None else row[0]
+        if not value:
+            return None
+        observed, repair = canonical_observation(value, ingested_at=None)
+        if observed is None or repair == AMBIGUOUS_UTC_HOUR:
+            return str(value)
+        return observed.isoformat()
+
+    def market_calendar_count(self) -> int:
+        with self.connection() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM market_calendar").fetchone()
+        return int(row[0] if row else 0)
+
+    def fetch_market_calendar_day(
+        self, session_date: str, *, segment: str = "CASH"
+    ) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM market_calendar
+                WHERE session_date = ? AND segment = ?
+                """,
+                (session_date, segment),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_market_calendar(self, rows: list[dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+        with self.connection() as conn:
+            conn.executemany(
+                """
+                INSERT INTO market_calendar (
+                    session_date, segment, is_trading_day, session_type,
+                    pre_open_start, pre_open_end, open_time, close_time, post_close_end,
+                    is_expiry, holiday_reason, source, source_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_date, segment) DO UPDATE SET
+                    is_trading_day=excluded.is_trading_day,
+                    session_type=excluded.session_type,
+                    pre_open_start=excluded.pre_open_start,
+                    pre_open_end=excluded.pre_open_end,
+                    open_time=excluded.open_time,
+                    close_time=excluded.close_time,
+                    post_close_end=excluded.post_close_end,
+                    is_expiry=excluded.is_expiry,
+                    holiday_reason=excluded.holiday_reason,
+                    source=excluded.source,
+                    source_version=excluded.source_version
+                """,
+                [
+                    (
+                        r["session_date"],
+                        r.get("segment") or "CASH",
+                        int(r.get("is_trading_day") or 0),
+                        r.get("session_type") or "NORMAL",
+                        r.get("pre_open_start"),
+                        r.get("pre_open_end"),
+                        r.get("open_time"),
+                        r.get("close_time"),
+                        r.get("post_close_end"),
+                        int(r.get("is_expiry") or 0),
+                        r.get("holiday_reason"),
+                        r["source"],
+                        r["source_version"],
+                    )
+                    for r in rows
+                ],
+            )
+        return len(rows)
+
+    def session_reference_count(self) -> int:
+        with self.connection() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM session_reference").fetchone()
+        return int(row[0] if row else 0)
+
     def fetch_latest_quotes_map(self) -> dict[str, dict[str, Any]]:
         with self.connection() as conn:
             rows = conn.execute("SELECT * FROM latest_quotes").fetchall()
-        return {str(dict(r)["symbol"]): dict(r) for r in rows}
+        return {str(dict(r)["symbol"]): canonicalize_row(dict(r)) for r in rows}
 
     def insert_activity_samples(self, rows: Iterable[dict[str, Any]]) -> int:
         payload = list(rows)
@@ -1685,6 +1832,36 @@ class SQLiteStore:
             "decision_count": int(n_decisions[0] if n_decisions else 0),
             "fill_count": int(n_fills[0] if n_fills else 0),
         }
+
+
+def _parse_stored_ts(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp
+
+
+def _timestamp_delta_seconds(later: Any, earlier: Any) -> float | None:
+    left = _parse_stored_ts(later)
+    right = _parse_stored_ts(earlier)
+    if left is None or right is None:
+        return None
+    return (left - right).total_seconds()
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return round(ordered[mid], 3)
+    return round((ordered[mid - 1] + ordered[mid]) / 2.0, 3)
 
 
 def _decode_decision(item: dict[str, Any]) -> dict[str, Any]:

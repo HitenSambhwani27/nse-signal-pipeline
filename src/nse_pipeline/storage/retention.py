@@ -57,17 +57,33 @@ def _older_than(paths: list[Path], *, keep: int, today: date) -> list[Path]:
     return [p for p in paths if date.fromisoformat(p.name) < cutoff]
 
 
-def disk_stats(path: Path, *, raw_bytes_per_session: int) -> tuple[float | None, int | None]:
+def disk_usage_report(path: Path, *, raw_bytes_per_session: int) -> dict[str, Any]:
     try:
         import shutil
 
         usage = shutil.disk_usage(path)
     except OSError:
-        return None, None
-    free_gb = round(usage.free / (1024**3), 2)
+        return {
+            "disk_total_gb": None,
+            "disk_used_gb": None,
+            "disk_free_gb": None,
+            "sessions_of_headroom": None,
+        }
+    total = float(usage.total)
+    free = float(usage.free)
+    used = total - free
     per = max(int(raw_bytes_per_session), 1)
-    headroom = int(usage.free // per)
-    return free_gb, headroom
+    return {
+        "disk_total_gb": round(total / (1024**3), 2),
+        "disk_used_gb": round(used / (1024**3), 2),
+        "disk_free_gb": round(free / (1024**3), 2),
+        "sessions_of_headroom": int(free // per),
+    }
+
+
+def disk_stats(path: Path, *, raw_bytes_per_session: int) -> tuple[float | None, int | None]:
+    report = disk_usage_report(path, raw_bytes_per_session=raw_bytes_per_session)
+    return report["disk_free_gb"], report["sessions_of_headroom"]
 
 
 def plan_retention(

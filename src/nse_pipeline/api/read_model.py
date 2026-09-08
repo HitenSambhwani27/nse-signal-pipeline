@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import unquote
+from zoneinfo import ZoneInfo
 
 from nse_pipeline.api.contracts import default_subsystems, intelligence_status
 from nse_pipeline.broker.session import public_token_status, token_present
@@ -21,13 +22,15 @@ from nse_pipeline.market.assemble import (
     assemble_unusual,
 )
 from nse_pipeline.market.cache_health import instrument_cache_health
+from nse_pipeline.market.calendar import build_session_view, iter_weekday_clock_days
+from nse_pipeline.market.observability import build_health_components
 from nse_pipeline.market.read_policy import MarketDataPolicy
 from nse_pipeline.signals.maturity import (
     CLASS_FROM_TRACK,
     maturity_snapshot,
     signal_public_view,
 )
-from nse_pipeline.storage.retention import disk_stats
+from nse_pipeline.storage.retention import disk_usage_report
 from nse_pipeline.storage.sqlite_store import SQLiteStore
 
 MATURITY_CACHE_TTL_S = 30.0
@@ -76,10 +79,17 @@ class SqliteUiReadModel:
         maturity = self._maturity()
         subsystems = default_subsystems()
         subsystems["intelligence"] = intelligence_status(maturity)
+        data_state = payload.get("data_state")
+        data_status = data_state.get("data_status") if isinstance(data_state, dict) else None
         return {
             "maturity": maturity,
             "as_of": _as_of(),
             "subsystems": subsystems,
+            "session": build_session_view(
+                self.settings.session,
+                now=self.policy.now(),
+                data_status=data_status,
+            ),
             **payload,
         }
 
@@ -132,6 +142,38 @@ class SqliteUiReadModel:
         blob["instrument_cache"] = self._instrument_cache_health()
         blob.update(self._disk_health())
         blob.update(self._token_health(blob))
+        calendar_rows = self._ensure_weekday_calendar()
+        quotes = self.store.latest_quotes_observation_stats()
+        account = (blob.get("processing_status") or {}).get("account") or {}
+        blob["retention"] = {
+            "mode": "dry_run",
+            "dry_run": True,
+            "applied": False,
+            "signal_log": "keep_forever",
+        }
+        blob["components"] = build_health_components(
+            clock=self.policy.market_state(),
+            now=self.policy.now(),
+            max_age_seconds=float(self.settings.analytics.live_quote_max_age_seconds),
+            quotes_count=int(quotes["count"]),
+            quotes_max_timestamp=quotes.get("max_timestamp"),
+            quotes_max_ingested_at=quotes.get("max_ingested_at"),
+            clock_skew_seconds=quotes.get("clock_skew_seconds"),
+            activity_max_timestamp=self.store.activity_samples_max_timestamp(),
+            cache_health=blob.get("instrument_cache"),
+            calendar_rows=calendar_rows,
+            holiday_list_seeded=False,
+            account_status=account.get("status"),
+            disk={
+                "disk_total_gb": blob.get("disk_total_gb"),
+                "disk_used_gb": blob.get("disk_used_gb"),
+                "disk_free_gb": blob.get("disk_free_gb"),
+                "sessions_of_headroom": blob.get("sessions_of_headroom"),
+            },
+            disk_warning=bool(blob.get("disk_warning")),
+            maturity=self._maturity(),
+            ingest_fresh=blob.get("ingest_fresh"),
+        )
         return self._envelope(health=blob, data_state=self.policy.overall_state().to_dict())
 
     def quote(self, symbol: str) -> dict[str, Any]:
@@ -355,15 +397,29 @@ class SqliteUiReadModel:
 
     def _disk_health(self) -> dict[str, Any]:
         estimate = int(self.settings.retention.raw_bytes_per_session_estimate)
-        free_gb, headroom = disk_stats(
+        report = disk_usage_report(
             self.settings.paths.data_dir, raw_bytes_per_session=estimate
         )
+        headroom = report.get("sessions_of_headroom")
         warning = headroom is not None and headroom < 10
         return {
-            "disk_free_gb": free_gb,
-            "sessions_of_headroom": headroom,
+            **report,
             "disk_warning": warning,
+            "retention_mode": "dry_run",
+            "retention_applied": False,
         }
+
+    def _ensure_weekday_calendar(self) -> int:
+        count = self.store.market_calendar_count()
+        if count > 0:
+            return count
+        today = self.policy.now().astimezone(ZoneInfo(self.settings.session.timezone)).date()
+        days = iter_weekday_clock_days(
+            self.settings.session,
+            start=today - timedelta(days=21),
+            end=today + timedelta(days=7),
+        )
+        return self.store.upsert_market_calendar([day.to_row() for day in days])
 
     def _token_health(self, blob: dict[str, Any]) -> dict[str, Any]:
         """Infer token state from observed processes. Does not call Kite."""

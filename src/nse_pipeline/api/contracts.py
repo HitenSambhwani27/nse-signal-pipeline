@@ -43,8 +43,40 @@ REFERENCE_TYPES = (
     "PREVIOUS_CLOSE",
     "OFFICIAL_CLOSE",
     "SETTLEMENT",
+    "TODAY_OPEN",
     "UNAVAILABLE",
 )
+
+# Legacy quote fields kept for compatibility. Canonical day-change is
+# reference_price / reference_type / change_absolute / change_percent (0-100).
+# `change` remains tick-to-tick price_delta. `change_pct` divides that tick
+# delta by ohlc_close and is not authoritative.
+LEGACY_CHANGE_FIELDS = ("change", "change_pct", "price_change", "price_change_pct")
+CANONICAL_CHANGE_FIELDS = (
+    "reference_price",
+    "reference_type",
+    "change_absolute",
+    "change_percent",
+    "reference_source",
+    "reference_reason",
+)
+
+HEALTH_COMPONENT_STATUSES = (
+    "healthy",
+    "degraded",
+    "unavailable",
+    "stale",
+    "not_applicable",
+)
+
+# Timestamp field meanings (architecture E.7). Display is always IST.
+TIMESTAMP_FIELDS = {
+    "observed_at": "canonical market observation instant (freshness / data_state.as_of)",
+    "exchange_timestamp": "broker/exchange observation; same instant as observed_at when present",
+    "ingested_at": "when this process received the packet (receive_time)",
+    "envelope.as_of": "HTTP response time; never market-data time",
+    "updated_at": "SQLite persist time; persistence lag only",
+}
 
 MATURITY_CONTRACT = {
     "suppress_below_days": 10,

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from nse_pipeline.market.timestamps import parse_kite_datetime
 from nse_pipeline.storage.schemas import NormalizedTick
 
 _IST = ZoneInfo("Asia/Kolkata")
@@ -27,22 +28,8 @@ def parse_depth_side(
 
 
 def _as_datetime(value: Any) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        ts = value
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        return ts
-    if isinstance(value, str) and value.strip():
-        try:
-            ts = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        return ts
-    return None
+    """Kite tick timestamps only. Naive values are IST wall-clock, not UTC."""
+    return parse_kite_datetime(value)
 
 
 def _int_or_none(value: Any) -> int | None:

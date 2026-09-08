@@ -1,0 +1,14 @@
+[Unit]
+Description=Start nse-ingest before the weekday cash session (08:45 machine TZ)
+# Machine TZ is Asia/Kolkata, matching nse-compact.timer and SessionSettings.
+# Does not model NSE holidays. A weekday holiday will still attempt a start.
+# Persistent=false: enabling this timer after 08:45 must not immediately start ingest.
+
+[Timer]
+OnCalendar=Mon..Fri 08:45:00
+Persistent=false
+Unit=nse-ingest.service
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

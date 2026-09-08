@@ -19,6 +19,9 @@ from nse_pipeline.api.read_model import SqliteUiReadModel
 from nse_pipeline.market.data_state import (
     MARKET_CLOSED,
     MARKET_OPEN,
+    MARKET_POST_CLOSE,
+    MARKET_PRE_OPEN,
+    MARKET_WEEKEND,
     STATUS_LAST_SESSION,
     STATUS_LIVE,
     STATUS_NO_DATA,
@@ -237,10 +240,12 @@ def _live_row(symbol: str, token: int, *, when: datetime, last_price: float) -> 
 def test_market_state_clock(tmp_path: Path) -> None:
     session = _settings(tmp_path).session
     assert market_state(session, now=MONDAY_OPEN_IST) == MARKET_OPEN
-    assert market_state(session, now=SUNDAY_IST) == MARKET_CLOSED
-    assert market_state(session, now=datetime(2026, 9, 7, 9, 14, tzinfo=IST)) == MARKET_CLOSED
-    assert market_state(session, now=datetime(2026, 9, 7, 15, 31, tzinfo=IST)) == MARKET_CLOSED
+    assert market_state(session, now=SUNDAY_IST) == MARKET_WEEKEND
+    assert market_state(session, now=datetime(2026, 9, 7, 9, 14, tzinfo=IST)) == MARKET_PRE_OPEN
+    assert market_state(session, now=datetime(2026, 9, 7, 15, 31, tzinfo=IST)) == MARKET_POST_CLOSE
     assert market_state(session, now=datetime(2026, 9, 7, 9, 15, tzinfo=IST)) == MARKET_OPEN
+    assert market_state(session, now=datetime(2026, 9, 7, 8, 59, tzinfo=IST)) == MARKET_CLOSED
+    assert market_state(session, now=datetime(2026, 9, 7, 16, 1, tzinfo=IST)) == MARKET_CLOSED
 
 
 def test_resolver_never_calls_a_stale_row_live(tmp_path: Path) -> None:
@@ -287,7 +292,7 @@ def test_market_closed_serves_last_session_with_real_timestamp(tmp_path: Path) -
     state = payload["data_state"]
     assert payload["found"] is True
     assert payload["quote"]["last_price"] == 2000.5
-    assert state["market_state"] == MARKET_CLOSED
+    assert state["market_state"] == MARKET_WEEKEND
     assert state["data_status"] == STATUS_LAST_SESSION
     assert state["source"] == "compacted_ticks"
     assert state["session_date"] == LAST_SESSION
@@ -324,7 +329,7 @@ def test_no_history_and_no_live_row_reports_no_data(tmp_path: Path) -> None:
     assert payload["data_state"]["data_status"] == STATUS_NO_DATA
     assert payload["data_state"]["as_of"] is None
     assert payload["data_state"]["session_date"] is None
-    assert payload["data_state"]["market_state"] == MARKET_CLOSED
+    assert payload["data_state"]["market_state"] == MARKET_WEEKEND
 
 
 # --- D: latest_quotes stays live-only --------------------------------------
@@ -659,6 +664,12 @@ def test_existing_envelope_survives_and_gains_data_state(tmp_path: Path) -> None
         state = payload.get("data_state")
         assert state is not None, path
         assert state["data_status"] in {STATUS_LIVE, STATUS_LAST_SESSION, STATUS_NO_DATA}, path
-        assert state["market_state"] in {MARKET_OPEN, MARKET_CLOSED}, path
+        assert state["market_state"] in {
+            MARKET_OPEN,
+            MARKET_CLOSED,
+            MARKET_PRE_OPEN,
+            MARKET_POST_CLOSE,
+            MARKET_WEEKEND,
+        }, path
         # Envelope as_of stays the response time; data_state.as_of is the data time.
         assert payload["as_of"] != state["as_of"], path

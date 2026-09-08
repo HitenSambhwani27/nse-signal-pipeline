@@ -37,6 +37,7 @@ from nse_pipeline.market.data_state import (
     no_data_state,
     resolve,
 )
+from nse_pipeline.market.freshness import describe_freshness
 from nse_pipeline.market.derived import (
     ask_depth_n,
     best_ask,
@@ -212,7 +213,7 @@ def snapshot_from_daily_bar(row: dict[str, Any], *, symbol: str) -> dict[str, An
 class SymbolSnapshot:
     """Best available snapshot for one symbol plus the state that produced it."""
 
-    __slots__ = ("symbol", "row", "previous", "state")
+    __slots__ = ("symbol", "row", "previous", "state", "_now", "_max_age_seconds")
 
     def __init__(
         self,
@@ -220,11 +221,16 @@ class SymbolSnapshot:
         row: dict[str, Any] | None,
         previous: dict[str, Any] | None,
         state: DataState,
+        *,
+        now: datetime | None = None,
+        max_age_seconds: float = 120.0,
     ) -> None:
         self.symbol = symbol
         self.row = row
         self.previous = previous
         self.state = state
+        self._now = now
+        self._max_age_seconds = float(max_age_seconds)
 
     @property
     def found(self) -> bool:
@@ -232,6 +238,12 @@ class SymbolSnapshot:
 
     def attach(self, payload: dict[str, Any]) -> dict[str, Any]:
         payload["data_state"] = self.state.to_dict()
+        payload["freshness"] = describe_freshness(
+            self.state,
+            self.row,
+            now=self._now,
+            max_age_seconds=self._max_age_seconds,
+        )
         return payload
 
 
@@ -308,7 +320,12 @@ class MarketDataPolicy:
         for name in names:
             row = live.get(name)
             stamp = None if row is None else row.get("timestamp")
-            if clock == MARKET_OPEN and is_fresh(stamp, max_age_seconds=self._max_age_s, now=moment):
+            if clock == MARKET_OPEN and is_fresh(
+                stamp,
+                max_age_seconds=self._max_age_s,
+                now=moment,
+                ingested_at=None if row is None else row.get("ingested_at"),
+            ):
                 continue
             needs_history.append(name)
         history = self._historical_rows(needs_history) if needs_history else {}
@@ -338,7 +355,12 @@ class MarketDataPolicy:
         clock = market_state(self.settings.session, now=moment)
         live = self.store.fetch_latest_quotes_map()
         if clock == MARKET_OPEN and any(
-            is_fresh(row.get("timestamp"), max_age_seconds=self._max_age_s, now=moment)
+            is_fresh(
+                row.get("timestamp"),
+                max_age_seconds=self._max_age_s,
+                now=moment,
+                ingested_at=row.get("ingested_at"),
+            )
             for row in live.values()
         ):
             names = list(live)[: int(limit)]
@@ -451,14 +473,22 @@ class MarketDataPolicy:
             live_timestamp=None if live_row is None else live_row.get("timestamp"),
             historical_timestamp=None if hist_row is None else hist_row.get("timestamp"),
             historical_source=hist_source,
+            live_ingested_at=None if live_row is None else live_row.get("ingested_at"),
+            historical_ingested_at=None if hist_row is None else hist_row.get("ingested_at"),
             max_age_seconds=self._max_age_s,
             now=moment,
         )
         if choice == CHOICE_HISTORICAL:
-            return SymbolSnapshot(name, hist_row, hist_prev, state)
+            return SymbolSnapshot(
+                name, hist_row, hist_prev, state, now=moment, max_age_seconds=self._max_age_s
+            )
         if choice == CHOICE_LIVE:
-            return SymbolSnapshot(name, live_row, None, state)
-        return SymbolSnapshot(name, None, None, state)
+            return SymbolSnapshot(
+                name, live_row, None, state, now=moment, max_age_seconds=self._max_age_s
+            )
+        return SymbolSnapshot(
+            name, None, None, state, now=moment, max_age_seconds=self._max_age_s
+        )
 
     def _expire_locked(self) -> None:
         now = _time.monotonic()

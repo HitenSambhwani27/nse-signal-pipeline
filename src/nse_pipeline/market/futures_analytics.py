@@ -5,6 +5,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from nse_pipeline.market.reference import resolve_reference
+from nse_pipeline.market.timestamps import parse_instant
+
 DEFAULT_BASIS_MAX_AGE_SECONDS = 10.0
 
 
@@ -40,24 +43,29 @@ def basis_pct(future_price: float | None, spot_price: float | None) -> float | N
 
 
 def parse_observation_ts(value: Any) -> datetime | None:
-    """Parse an observation timestamp. Does not substitute wall-clock time."""
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        text = str(value).strip()
-        if not text:
-            return None
+    """Parse an observation timestamp. Does not substitute wall-clock time.
+
+    Timezone-aware ISO keeps its offset. Naive datetimes keep the historical
+    UTC-attach behaviour used by compacted rows that were stored without a zone.
+    Kite ingest must call ``parse_kite_datetime`` instead of this function.
+    """
+    parsed = parse_instant(value)
+    if parsed is not None:
+        return parsed
+    if isinstance(value, datetime) and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str) and value.strip():
+        text = value.strip()
         if text.endswith("Z"):
             text = text[:-1] + "+00:00"
         try:
             dt = datetime.fromisoformat(text)
         except ValueError:
             return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    return None
 
 
 def observation_age_seconds(first: Any, second: Any) -> float | None:
@@ -170,6 +178,7 @@ def futures_snapshot(
     )
     basis_val = freshness["basis"]
     basis_p = freshness["basis_pct"]
+    canonical = resolve_reference(q, instrument_type=meta.get("instrument_type") or "FUT")
     return {
         "symbol": q.get("symbol") or meta.get("tradingsymbol"),
         "underlying": meta.get("name"),
@@ -202,4 +211,5 @@ def futures_snapshot(
         "basis_status": freshness["basis_status"],
         "price_oi": price_oi_interpretation(px_change, oi_change),
         "kind": "observed+derived+inferred",
+        **canonical,
     }

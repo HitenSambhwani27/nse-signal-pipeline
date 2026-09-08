@@ -40,12 +40,17 @@ if [[ "${COUNT}" -eq 1 ]]; then
 fi
 
 sudo cp "$ROOT/deploy/vm/nse-ingest.service" /etc/systemd/system/nse-ingest.service
+sudo cp "$ROOT/deploy/vm/nse-ingest.timer" /etc/systemd/system/nse-ingest.timer
+sudo chmod 644 /etc/systemd/system/nse-ingest.service /etc/systemd/system/nse-ingest.timer
 sudo systemctl daemon-reload
-sudo systemctl enable nse-ingest
+sudo systemctl enable nse-ingest nse-ingest.timer
+sudo systemctl start nse-ingest.timer
 sudo systemctl start nse-ingest
 sleep 2
 systemctl is-active nse-ingest
 systemctl is-enabled nse-ingest
+systemctl is-enabled nse-ingest.timer
+systemctl list-timers nse-ingest.timer --no-pager || true
 echo "=== remaining python ingest processes (must be exactly one) ==="
 pgrep -af '[p]ython.*01_run_ingestion' || echo "NO_INGEST_PROCESS"
 COUNT_AFTER="$(pgrep -c -f '[p]ython.*01_run_ingestion' || true)"
