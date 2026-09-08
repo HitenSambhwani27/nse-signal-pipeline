@@ -23,6 +23,7 @@ from typing import Any, Iterable, Sequence
 import pandas as pd
 
 from nse_pipeline.config import Settings
+from nse_pipeline.market.calendar import load_calendar_day
 from nse_pipeline.market.data_state import (
     CHOICE_HISTORICAL,
     CHOICE_LIVE,
@@ -278,8 +279,11 @@ class MarketDataPolicy:
     def now(self) -> datetime:
         return self._now_fn()
 
+    def calendar_day(self):
+        return load_calendar_day(self.store, self.settings.session, now=self.now())
+
     def market_state(self) -> str:
-        return market_state(self.settings.session, now=self.now())
+        return market_state(self.settings.session, now=self.now(), day=self.calendar_day())
 
     def session_date(self) -> str | None:
         """Newest compacted date holding completed-session data."""
@@ -313,7 +317,8 @@ class MarketDataPolicy:
         if not names:
             return {}
         moment = self.now()
-        clock = market_state(self.settings.session, now=moment)
+        day = self.calendar_day()
+        clock = market_state(self.settings.session, now=moment, day=day)
         live = self._live_rows(names)
 
         needs_history: list[str] = []
@@ -352,7 +357,8 @@ class MarketDataPolicy:
         last two ticks of a session often have a zero OI delta.
         """
         moment = self.now()
-        clock = market_state(self.settings.session, now=moment)
+        day = self.calendar_day()
+        clock = market_state(self.settings.session, now=moment, day=day)
         live = self.store.fetch_latest_quotes_map()
         if clock == MARKET_OPEN and any(
             is_fresh(
@@ -477,6 +483,7 @@ class MarketDataPolicy:
             historical_ingested_at=None if hist_row is None else hist_row.get("ingested_at"),
             max_age_seconds=self._max_age_s,
             now=moment,
+            day=self.calendar_day(),
         )
         if choice == CHOICE_HISTORICAL:
             return SymbolSnapshot(

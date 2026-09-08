@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import unquote
 from zoneinfo import ZoneInfo
@@ -19,10 +19,16 @@ from nse_pipeline.market.assemble import (
     assemble_market_activity,
     assemble_option_chain,
     assemble_quote,
+    assemble_quotes,
     assemble_unusual,
 )
 from nse_pipeline.market.cache_health import instrument_cache_health
-from nse_pipeline.market.calendar import build_session_view, iter_weekday_clock_days
+from nse_pipeline.market.calendar import (
+    build_session_view,
+    calendar_lookup,
+    ensure_weekday_calendar,
+    load_calendar_day,
+)
 from nse_pipeline.market.observability import build_health_components
 from nse_pipeline.market.read_policy import MarketDataPolicy
 from nse_pipeline.signals.maturity import (
@@ -81,14 +87,18 @@ class SqliteUiReadModel:
         subsystems["intelligence"] = intelligence_status(maturity)
         data_state = payload.get("data_state")
         data_status = data_state.get("data_status") if isinstance(data_state, dict) else None
+        now = self.policy.now()
+        self._ensure_weekday_calendar()
         return {
             "maturity": maturity,
             "as_of": _as_of(),
             "subsystems": subsystems,
             "session": build_session_view(
                 self.settings.session,
-                now=self.policy.now(),
+                now=now,
                 data_status=data_status,
+                day=load_calendar_day(self.store, self.settings.session, now=now),
+                lookup=calendar_lookup(self.store, self.settings.session),
             ),
             **payload,
         }
@@ -342,11 +352,17 @@ class SqliteUiReadModel:
                 if symbol not in wanted:
                     wanted.append(symbol)
         snapshots = self.policy.snapshots(wanted)
+        assembled = assemble_quotes(
+            self.settings,
+            self.store,
+            cache,
+            wanted,
+            policy=self.policy,
+            snapshots=snapshots,
+        )
         quotes = []
         for symbol in wanted:
-            dto = assemble_quote(
-                self.settings, self.store, cache, symbol, policy=self.policy
-            )
+            dto = assembled.get(symbol)
             quotes.append(
                 {
                     "symbol": symbol,
@@ -410,16 +426,8 @@ class SqliteUiReadModel:
         }
 
     def _ensure_weekday_calendar(self) -> int:
-        count = self.store.market_calendar_count()
-        if count > 0:
-            return count
         today = self.policy.now().astimezone(ZoneInfo(self.settings.session.timezone)).date()
-        days = iter_weekday_clock_days(
-            self.settings.session,
-            start=today - timedelta(days=21),
-            end=today + timedelta(days=7),
-        )
-        return self.store.upsert_market_calendar([day.to_row() for day in days])
+        return ensure_weekday_calendar(self.store, self.settings.session, today=today)
 
     def _token_health(self, blob: dict[str, Any]) -> dict[str, Any]:
         """Infer token state from observed processes. Does not call Kite."""

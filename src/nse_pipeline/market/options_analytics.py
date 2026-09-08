@@ -150,6 +150,8 @@ def _side_from_quote(
     as_of: Any = None,
     close_hhmm: str = "15:30",
     underlying: str | None = None,
+    stored: dict[str, Any] | None = None,
+    session_date: str | None = None,
 ) -> dict[str, Any]:
     q = quote or {}
     oi = _f(q.get("oi"))
@@ -199,7 +201,12 @@ def _side_from_quote(
         "iv_rate": iv_row.get("iv_rate"),
         "iv_dividend_yield": iv_row.get("iv_dividend_yield"),
         "iv_exercise_style": iv_row.get("iv_exercise_style"),
-        **resolve_reference(q, instrument_type=meta.get("instrument_type")),
+        **resolve_reference(
+            q,
+            instrument_type=meta.get("instrument_type"),
+            stored=stored,
+            session_date=session_date,
+        ),
     }
 
 
@@ -221,6 +228,8 @@ def build_option_chain(
     rate: float = 0.06,
     as_of: Any = None,
     close_hhmm: str = "15:30",
+    stored_by_symbol: dict[str, dict[str, Any]] | None = None,
+    session_date_by_symbol: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
     by_strike: dict[float, dict[str, Any]] = {}
     for meta in contracts:
@@ -233,6 +242,9 @@ def build_option_chain(
         )
         kind = str(meta.get("instrument_type") or "").upper()
         quote = quotes_by_symbol.get(str(meta.get("tradingsymbol")))
+        symbol = str(meta.get("tradingsymbol"))
+        stored_map = stored_by_symbol or {}
+        session_map = session_date_by_symbol or {}
         side = _side_from_quote(
             quote,
             meta,
@@ -241,6 +253,8 @@ def build_option_chain(
             as_of=as_of,
             close_hhmm=close_hhmm,
             underlying=underlying,
+            stored=stored_map.get(symbol),
+            session_date=session_map.get(symbol),
         )
         if kind == "CE":
             row["ce"] = side

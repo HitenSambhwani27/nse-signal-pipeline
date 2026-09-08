@@ -160,6 +160,8 @@ def futures_snapshot(
     spot_as_of: str | None,
     spot_symbol: str | None,
     max_age_seconds: float = DEFAULT_BASIS_MAX_AGE_SECONDS,
+    stored: dict[str, Any] | None = None,
+    session_date: str | None = None,
 ) -> dict[str, Any]:
     q = quote or {}
     meta = meta or {}
@@ -178,7 +180,12 @@ def futures_snapshot(
     )
     basis_val = freshness["basis"]
     basis_p = freshness["basis_pct"]
-    canonical = resolve_reference(q, instrument_type=meta.get("instrument_type") or "FUT")
+    canonical = resolve_reference(
+        q,
+        instrument_type=meta.get("instrument_type") or "FUT",
+        stored=stored,
+        session_date=session_date,
+    )
     return {
         "symbol": q.get("symbol") or meta.get("tradingsymbol"),
         "underlying": meta.get("name"),

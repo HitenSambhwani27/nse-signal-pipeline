@@ -30,6 +30,7 @@ from nse_pipeline.market.calendar import (
     POST_CLOSE,
     PRE_OPEN,
     WEEKEND,
+    CalendarDay,
     cash_session_open,
     session_clock,
 )
@@ -85,12 +86,17 @@ class DataState:
         }
 
 
-def market_state(session: SessionSettings, *, now: datetime | None = None) -> str:
+def market_state(
+    session: SessionSettings,
+    *,
+    now: datetime | None = None,
+    day: CalendarDay | None = None,
+) -> str:
     """Session clock: pre_open / open / post_close / closed / weekend.
 
     Holidays are not claimed until an NSE holiday list is seeded.
     """
-    return session_clock(session, now=now)
+    return session_clock(session, now=now, day=day)
 
 
 def observation_age_seconds(
@@ -167,6 +173,7 @@ def resolve(
     historical_ingested_at: Any = None,
     max_age_seconds: float,
     now: datetime | None = None,
+    day: CalendarDay | None = None,
 ) -> tuple[str, DataState]:
     """Pick between a live snapshot and a historical observation.
 
@@ -174,7 +181,7 @@ def resolve(
     historical read because live data was already fresh.
     """
     moment = now or datetime.now(timezone.utc)
-    clock = market_state(session, now=moment)
+    clock = market_state(session, now=moment, day=day)
     live_obs, live_repair = canonical_observation(live_timestamp, ingested_at=live_ingested_at)
     hist_obs, hist_repair = canonical_observation(
         historical_timestamp, ingested_at=historical_ingested_at

@@ -205,6 +205,59 @@ def previous_trading_day(
     return None, False
 
 
+def calendar_lookup(store: Any, session: SessionSettings, *, segment: str = "CASH", conn=None):
+    """RM-5 table lookup. Missing rows fall through to weekday_clock derivation."""
+
+    def lookup(iso: str) -> CalendarDay | None:
+        row = store.fetch_market_calendar_day(iso, segment=segment, conn=conn)
+        if row is None:
+            return None
+        return calendar_day_from_row(row, session)
+
+    return lookup
+
+
+def load_calendar_day(
+    store: Any,
+    session: SessionSettings,
+    *,
+    session_date: str | None = None,
+    now: datetime | None = None,
+    segment: str = "CASH",
+    conn=None,
+) -> CalendarDay:
+    tz = ZoneInfo(session.timezone)
+    moment = (now or datetime.now(timezone.utc)).astimezone(tz)
+    iso = session_date or moment.date().isoformat()
+    row = store.fetch_market_calendar_day(iso, segment=segment, conn=conn)
+    if row is not None:
+        return calendar_day_from_row(row, session)
+    return derive_calendar_day(date.fromisoformat(iso), session, segment=segment)
+
+
+def ensure_weekday_calendar(
+    store: Any,
+    session: SessionSettings,
+    *,
+    today: date,
+    lookback_days: int = 21,
+    lookahead_days: int = 7,
+    segment: str = "CASH",
+    conn=None,
+) -> int:
+    """Seed weekday/weekend rows only when the table is empty. Never invents holidays."""
+    count = store.market_calendar_count(conn=conn)
+    if count > 0:
+        return count
+    days = iter_weekday_clock_days(
+        session,
+        start=today - timedelta(days=lookback_days),
+        end=today + timedelta(days=lookahead_days),
+        segment=segment,
+    )
+    return store.upsert_market_calendar([day.to_row() for day in days], conn=conn)
+
+
 def build_session_view(
     session: SessionSettings,
     *,
@@ -214,12 +267,13 @@ def build_session_view(
     clock_skew_seconds: float | None = None,
     day: CalendarDay | None = None,
     live_expected: bool | None = None,
+    lookup=None,
 ) -> dict[str, Any]:
     tz = ZoneInfo(session.timezone)
     moment = (now or datetime.now(timezone.utc)).astimezone(tz)
     info = day or derive_calendar_day(moment.date(), session)
     clock = session_clock(session, now=moment, day=info)
-    prev, prev_complete = previous_trading_day(session, as_of=moment.date())
+    prev, prev_complete = previous_trading_day(session, as_of=moment.date(), lookup=lookup)
     expected = cash_session_open(clock) if live_expected is None else live_expected
     return {
         "market_state": clock,

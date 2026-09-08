@@ -14,7 +14,13 @@ def _ratio(numer: float | None, denom: float | None) -> float | None:
     return (float(numer) / float(denom)) * 100.0
 
 
-def enrich_quote(row: dict[str, Any], *, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+def enrich_quote(
+    row: dict[str, Any],
+    *,
+    meta: dict[str, Any] | None = None,
+    stored: dict[str, Any] | None = None,
+    session_date: str | None = None,
+) -> dict[str, Any]:
     dto = public_quote(row, meta=meta)
     last = row.get("last_price")
     prev_close = row.get("ohlc_close")
@@ -59,6 +65,8 @@ def enrich_quote(row: dict[str, Any], *, meta: dict[str, Any] | None = None) -> 
         resolve_reference(
             row,
             instrument_type=(meta or {}).get("instrument_type") or row.get("instrument_type"),
+            stored=stored,
+            session_date=session_date,
         )
     )
     return dto

@@ -21,6 +21,7 @@ from nse_pipeline.market.options_analytics import build_option_chain
 from nse_pipeline.market.quotes import enrich_quote
 from nse_pipeline.market.read_policy import MarketDataPolicy, SymbolSnapshot
 from nse_pipeline.market.data_state import resolve
+from nse_pipeline.market.session_reference import maintain_session_references, stored_for_snapshot
 from nse_pipeline.market.universe import INDEX_SPOT_BY_NAME, infer_strike_interval
 from nse_pipeline.market.unusual import unusual_activity_score
 from nse_pipeline.storage.sqlite_store import SQLiteStore
@@ -115,6 +116,25 @@ def _future_contracts(cache: dict[str, Any], underlying: str) -> list[dict[str, 
     ]
 
 
+def _bind_session_refs(
+    settings: Settings,
+    store: SQLiteStore,
+    cache: dict[str, Any] | None,
+    snapshots: dict[str, SymbolSnapshot],
+    *,
+    now=None,
+) -> dict[tuple[str, int], dict[str, Any]]:
+    items = []
+    for symbol, snap in snapshots.items():
+        if snap.row is None:
+            continue
+        meta = lookup_instrument_meta(cache or {}, symbol)
+        items.append((snap.row, snap.state, meta))
+    if not items:
+        return {}
+    return maintain_session_references(store, settings.session, items, now=now)
+
+
 def assemble_quote(
     settings: Settings,
     store: SQLiteStore,
@@ -123,11 +143,39 @@ def assemble_quote(
     *,
     policy: MarketDataPolicy | None = None,
 ) -> dict[str, Any] | None:
-    snap = _policy(settings, store, policy).snapshot(symbol)
-    if snap.row is None:
-        return None
-    meta = lookup_instrument_meta(cache or {}, symbol)
-    return snap.attach(enrich_quote(snap.row, meta=meta))
+    bundled = assemble_quotes(settings, store, cache, [symbol], policy=policy)
+    return bundled.get(symbol)
+
+
+def assemble_quotes(
+    settings: Settings,
+    store: SQLiteStore,
+    cache: dict[str, Any] | None,
+    symbols: list[str],
+    *,
+    policy: MarketDataPolicy | None = None,
+    snapshots: dict[str, SymbolSnapshot] | None = None,
+) -> dict[str, dict[str, Any] | None]:
+    read = _policy(settings, store, policy)
+    snaps = snapshots if snapshots is not None else read.snapshots(symbols)
+    refs = _bind_session_refs(settings, store, cache, snaps, now=read.now())
+    out: dict[str, dict[str, Any] | None] = {}
+    for symbol in symbols:
+        snap = snaps.get(symbol) or _blank(symbol, read)
+        if snap.row is None:
+            out[symbol] = None
+            continue
+        meta = lookup_instrument_meta(cache or {}, symbol)
+        stored = stored_for_snapshot(refs, snap.row, snap.state)
+        out[symbol] = snap.attach(
+            enrich_quote(
+                snap.row,
+                meta=meta,
+                stored=stored,
+                session_date=snap.state.session_date,
+            )
+        )
+    return out
 
 
 def assemble_option_chain(
@@ -148,6 +196,14 @@ def assemble_option_chain(
     wanted = [spot_sym] + [str(c.get("tradingsymbol")) for c in contracts]
     snapshots = read.snapshots(wanted)
     quotes = _rows(snapshots)
+    refs = _bind_session_refs(settings, store, cache, snapshots, now=read.now())
+    stored_by_symbol: dict[str, dict[str, Any]] = {}
+    session_date_by_symbol: dict[str, str | None] = {}
+    for name, snap in snapshots.items():
+        stored = stored_for_snapshot(refs, snap.row, snap.state)
+        if stored is not None:
+            stored_by_symbol[name] = stored
+        session_date_by_symbol[name] = snap.state.session_date
     spot_snap = snapshots.get(spot_sym) or _blank(spot_sym, read)
     spot_row = spot_snap.row
     spot = None if spot_row is None else spot_row.get("last_price")
@@ -180,6 +236,8 @@ def assemble_option_chain(
         truncated=truncated,
         rate=cfg.option_risk_free_rate,
         close_hhmm=settings.session.market_close,
+        stored_by_symbol=stored_by_symbol,
+        session_date_by_symbol=session_date_by_symbol,
     )
     chain["available_expiries"] = expiries
     chain["found"] = bool(contracts)
@@ -203,6 +261,7 @@ def assemble_futures(
     # Spot and futures resolve in one read so basis compares the same session.
     wanted = [spot_sym] + [str(c.get("tradingsymbol")) for c in contracts]
     snapshots = read.snapshots(wanted)
+    refs = _bind_session_refs(settings, store, cache, snapshots, now=read.now())
     spot_snap = snapshots.get(spot_sym) or _blank(spot_sym, read)
     spot_row = spot_snap.row
     spot = None if spot_row is None else spot_row.get("last_price")
@@ -220,6 +279,8 @@ def assemble_futures(
                     spot_as_of=spot_as_of,
                     spot_symbol=spot_sym,
                     max_age_seconds=_cfg(settings).futures_basis_max_age_seconds,
+                    stored=stored_for_snapshot(refs, snap.row, snap.state),
+                    session_date=snap.state.session_date,
                 )
             )
         )
@@ -244,6 +305,7 @@ def _activity_bundle(
     symbol: str,
     *,
     snapshot: SymbolSnapshot,
+    stored: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     quote = snapshot.row
     if quote is None:
@@ -312,7 +374,12 @@ def _activity_bundle(
         "liquidity_events": events,
         "price_impact": impact,
         "unusual": unusual,
-        "quote": enrich_quote(quote, meta=meta),
+        "quote": enrich_quote(
+            quote,
+            meta=meta,
+            stored=stored,
+            session_date=snapshot.state.session_date,
+        ),
         "data_state": snapshot.state.to_dict(),
     }
 
@@ -326,8 +393,15 @@ def assemble_market_activity(
     policy: MarketDataPolicy | None = None,
 ) -> dict[str, Any] | None:
     read = _policy(settings, store, policy)
+    snapshot = read.snapshot(symbol)
+    refs = _bind_session_refs(settings, store, cache, {symbol: snapshot}, now=read.now())
     return _activity_bundle(
-        settings, store, cache, symbol, snapshot=read.snapshot(symbol)
+        settings,
+        store,
+        cache,
+        symbol,
+        snapshot=snapshot,
+        stored=stored_for_snapshot(refs, snapshot.row, snapshot.state),
     )
 
 
@@ -356,9 +430,17 @@ def assemble_unusual(
         limit=UNUSUAL_LIVE_CANDIDATE_LIMIT,
         historical_limit=_unusual_historical_candidate_limit(settings, limit),
     )
+    refs = _bind_session_refs(settings, store, cache, snapshots, now=read.now())
     ranked = []
     for symbol, snap in snapshots.items():
-        bundle = _activity_bundle(settings, store, cache, symbol, snapshot=snap)
+        bundle = _activity_bundle(
+            settings,
+            store,
+            cache,
+            symbol,
+            snapshot=snap,
+            stored=stored_for_snapshot(refs, snap.row, snap.state),
+        )
         if not bundle:
             continue
         score = bundle["unusual"]["activity_score"]

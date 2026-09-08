@@ -341,14 +341,89 @@ CREATE TABLE IF NOT EXISTS market_calendar (
 
 CREATE TABLE IF NOT EXISTS session_reference (
     session_date TEXT NOT NULL,
-    instrument_key TEXT NOT NULL,
-    reference_type TEXT NOT NULL,
-    reference_price REAL,
+    instrument_token INTEGER NOT NULL,
+    symbol TEXT,
+    previous_close REAL,
+    today_open REAL,
+    official_close REAL,
     settlement_price REAL,
+    reference_price REAL,
+    reference_type TEXT,
     source TEXT,
-    PRIMARY KEY (session_date, instrument_key)
+    reference_reason TEXT,
+    PRIMARY KEY (session_date, instrument_token)
 );
 """
+
+
+def _migrate_session_reference(conn: sqlite3.Connection) -> None:
+    """Bring Phase 1 stub table up to RM-2 columns. Does not invent prices."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(session_reference)").fetchall()}
+    if not cols:
+        return
+    if "instrument_token" in cols and "previous_close" in cols and "today_open" in cols:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_reference_session_symbol "
+            "ON session_reference(session_date, symbol)"
+        )
+        return
+    conn.execute("ALTER TABLE session_reference RENAME TO session_reference_legacy")
+    conn.execute(
+        """
+        CREATE TABLE session_reference (
+            session_date TEXT NOT NULL,
+            instrument_token INTEGER NOT NULL,
+            symbol TEXT,
+            previous_close REAL,
+            today_open REAL,
+            official_close REAL,
+            settlement_price REAL,
+            reference_price REAL,
+            reference_type TEXT,
+            source TEXT,
+            reference_reason TEXT,
+            PRIMARY KEY (session_date, instrument_token)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_reference_session_symbol "
+        "ON session_reference(session_date, symbol)"
+    )
+    legacy = [dict(row) for row in conn.execute("SELECT * FROM session_reference_legacy")]
+    for row in legacy:
+        token = row.get("instrument_token")
+        if token is None:
+            key = row.get("instrument_key")
+            try:
+                token = int(key) if key is not None and str(key).isdigit() else None
+            except (TypeError, ValueError):
+                token = None
+        if token is None:
+            continue
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO session_reference (
+                session_date, instrument_token, symbol, previous_close, today_open,
+                official_close, settlement_price, reference_price, reference_type,
+                source, reference_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row.get("session_date"),
+                int(token),
+                row.get("symbol"),
+                row.get("previous_close"),
+                row.get("today_open"),
+                row.get("official_close"),
+                row.get("settlement_price"),
+                row.get("reference_price"),
+                row.get("reference_type"),
+                row.get("source"),
+                row.get("reference_reason"),
+            ),
+        )
+    conn.execute("DROP TABLE session_reference_legacy")
 
 
 class SQLiteStore:
@@ -419,6 +494,7 @@ class SQLiteStore:
             ):
                 if col not in lq_cols:
                     conn.execute(sql)
+            _migrate_session_reference(conn)
 
     @contextmanager
     def connection(self) -> Generator[sqlite3.Connection, None, None]:
@@ -1059,29 +1135,42 @@ class SQLiteStore:
             return str(value)
         return observed.isoformat()
 
-    def market_calendar_count(self) -> int:
-        with self.connection() as conn:
-            row = conn.execute("SELECT COUNT(*) FROM market_calendar").fetchone()
-        return int(row[0] if row else 0)
+    def _with_conn(self, conn: sqlite3.Connection | None, callback):
+        if conn is not None:
+            return callback(conn)
+        with self.connection() as owned:
+            return callback(owned)
+
+    def market_calendar_count(self, *, conn: sqlite3.Connection | None = None) -> int:
+        def _run(c: sqlite3.Connection) -> int:
+            row = c.execute("SELECT COUNT(*) FROM market_calendar").fetchone()
+            return int(row[0] if row else 0)
+
+        return self._with_conn(conn, _run)
 
     def fetch_market_calendar_day(
-        self, session_date: str, *, segment: str = "CASH"
+        self, session_date: str, *, segment: str = "CASH", conn: sqlite3.Connection | None = None
     ) -> dict[str, Any] | None:
-        with self.connection() as conn:
-            row = conn.execute(
+        def _run(c: sqlite3.Connection) -> dict[str, Any] | None:
+            row = c.execute(
                 """
                 SELECT * FROM market_calendar
                 WHERE session_date = ? AND segment = ?
                 """,
                 (session_date, segment),
             ).fetchone()
-        return dict(row) if row else None
+            return dict(row) if row else None
 
-    def upsert_market_calendar(self, rows: list[dict[str, Any]]) -> int:
+        return self._with_conn(conn, _run)
+
+    def upsert_market_calendar(
+        self, rows: list[dict[str, Any]], *, conn: sqlite3.Connection | None = None
+    ) -> int:
         if not rows:
             return 0
-        with self.connection() as conn:
-            conn.executemany(
+
+        def _run(c: sqlite3.Connection) -> int:
+            c.executemany(
                 """
                 INSERT INTO market_calendar (
                     session_date, segment, is_trading_day, session_type,
@@ -1120,12 +1209,106 @@ class SQLiteStore:
                     for r in rows
                 ],
             )
-        return len(rows)
+            return len(rows)
+
+        return self._with_conn(conn, _run)
 
     def session_reference_count(self) -> int:
         with self.connection() as conn:
             row = conn.execute("SELECT COUNT(*) FROM session_reference").fetchone()
         return int(row[0] if row else 0)
+
+    def fetch_session_reference(
+        self, session_date: str, instrument_token: int, *, conn: sqlite3.Connection | None = None
+    ) -> dict[str, Any] | None:
+        def _run(c: sqlite3.Connection) -> dict[str, Any] | None:
+            row = c.execute(
+                """
+                SELECT * FROM session_reference
+                WHERE session_date = ? AND instrument_token = ?
+                """,
+                (session_date, int(instrument_token)),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+        return self._with_conn(conn, _run)
+
+    def fetch_session_reference_map(
+        self,
+        session_date: str,
+        instrument_tokens: Iterable[int],
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[int, dict[str, Any]]:
+        tokens = sorted({int(t) for t in instrument_tokens})
+        if not tokens:
+            return {}
+        placeholders = ",".join("?" for _ in tokens)
+
+        def _run(c: sqlite3.Connection) -> dict[int, dict[str, Any]]:
+            rows = c.execute(
+                f"""
+                SELECT * FROM session_reference
+                WHERE session_date = ? AND instrument_token IN ({placeholders})
+                """,
+                (session_date, *tokens),
+            ).fetchall()
+            return {int(dict(r)["instrument_token"]): dict(r) for r in rows}
+
+        return self._with_conn(conn, _run)
+
+    def upsert_session_references(
+        self, rows: Iterable[dict[str, Any]], *, conn: sqlite3.Connection | None = None
+    ) -> int:
+        payload = list(rows)
+        if not payload:
+            return 0
+
+        def _run(c: sqlite3.Connection) -> int:
+            c.executemany(
+                """
+                INSERT INTO session_reference (
+                    session_date, instrument_token, symbol, previous_close, today_open,
+                    official_close, settlement_price, reference_price, reference_type,
+                    source, reference_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_date, instrument_token) DO UPDATE SET
+                    symbol = COALESCE(excluded.symbol, session_reference.symbol),
+                    previous_close = COALESCE(
+                        session_reference.previous_close, excluded.previous_close
+                    ),
+                    today_open = COALESCE(session_reference.today_open, excluded.today_open),
+                    official_close = COALESCE(
+                        session_reference.official_close, excluded.official_close
+                    ),
+                    settlement_price = COALESCE(
+                        session_reference.settlement_price, excluded.settlement_price
+                    ),
+                    reference_price = excluded.reference_price,
+                    reference_type = excluded.reference_type,
+                    source = excluded.source,
+                    reference_reason = excluded.reference_reason
+                """,
+                [
+                    (
+                        r["session_date"],
+                        int(r["instrument_token"]),
+                        r.get("symbol"),
+                        r.get("previous_close"),
+                        r.get("today_open"),
+                        r.get("official_close"),
+                        r.get("settlement_price"),
+                        r.get("reference_price"),
+                        r.get("reference_type"),
+                        r.get("source"),
+                        r.get("reference_reason"),
+                    )
+                    for r in payload
+                ],
+            )
+            return len(payload)
+
+        return self._with_conn(conn, _run)
 
     def fetch_latest_quotes_map(self) -> dict[str, dict[str, Any]]:
         with self.connection() as conn:

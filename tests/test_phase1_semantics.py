@@ -65,12 +65,29 @@ IST = ZoneInfo("Asia/Kolkata")
 def _row(**overrides) -> dict:
     base = {
         "symbol": "HDFCBANK",
+        "instrument_token": 341249,
         "instrument_type": "EQ",
         "last_price": 2010.0,
         "ohlc_open": 2005.0,
         "ohlc_close": 2000.0,
         "price_delta": 0.25,
         "timestamp": MONDAY_OPEN_IST.astimezone(timezone.utc).isoformat(),
+    }
+    base.update(overrides)
+    return base
+
+
+def _stored(**overrides) -> dict:
+    base = {
+        "session_date": "2026-09-07",
+        "instrument_token": 341249,
+        "symbol": "HDFCBANK",
+        "previous_close": 2000.0,
+        "today_open": 2005.0,
+        "official_close": None,
+        "settlement_price": None,
+        "reference_type": REF_PREVIOUS_CLOSE,
+        "source": "session_reference",
     }
     base.update(overrides)
     return base
@@ -92,15 +109,16 @@ def test_session_clock_and_live_expectation(tmp_path: Path) -> None:
 
 
 def test_canonical_change_positive_negative_zero() -> None:
-    up = resolve_reference(_row(last_price=2010.0, ohlc_close=2000.0))
+    stored = _stored()
+    up = resolve_reference(_row(last_price=2010.0), stored=stored, session_date="2026-09-07")
     assert up["reference_type"] == REF_PREVIOUS_CLOSE
     assert up["reference_price"] == 2000.0
     assert up["change_absolute"] == 10.0
     assert up["change_percent"] == 0.5
-    down = resolve_reference(_row(last_price=1990.0, ohlc_close=2000.0))
+    down = resolve_reference(_row(last_price=1990.0), stored=stored, session_date="2026-09-07")
     assert down["change_absolute"] == -10.0
     assert down["change_percent"] == -0.5
-    flat = resolve_reference(_row(last_price=2000.0, ohlc_close=2000.0))
+    flat = resolve_reference(_row(last_price=2000.0), stored=stored, session_date="2026-09-07")
     assert flat["change_absolute"] == 0.0
     assert flat["change_percent"] == 0.0
 
@@ -111,19 +129,42 @@ def test_canonical_change_missing_and_invalid_reference() -> None:
     assert missing["change_absolute"] is None
     assert missing["change_percent"] is None
     assert missing["reference_reason"] == "no_reference"
-    zero = resolve_reference(_row(ohlc_close=0, ohlc_open=None))
+    zero = resolve_reference(
+        _row(),
+        stored=_stored(previous_close=0, today_open=None),
+        session_date="2026-09-07",
+    )
     assert zero["change_absolute"] is None
     assert zero["reference_reason"] == "no_reference"
-    opened = resolve_reference(_row(ohlc_close=None, ohlc_open=2005.0, last_price=2010.0))
+    opened = resolve_reference(
+        _row(last_price=2010.0),
+        stored=_stored(previous_close=None, today_open=2005.0),
+        session_date="2026-09-07",
+    )
     assert opened["reference_type"] == REF_TODAY_OPEN
     assert opened["change_absolute"] == 5.0
-    fut = resolve_reference(_row(instrument_type="FUT", ohlc_close=100.0, last_price=101.0))
+    fut = resolve_reference(
+        _row(instrument_type="FUT", last_price=101.0),
+        stored=_stored(previous_close=100.0, reference_type=REF_OFFICIAL_CLOSE),
+        session_date="2026-09-07",
+    )
     assert fut["reference_type"] == REF_OFFICIAL_CLOSE
     assert fut["change_percent"] == 1.0
 
 
+def test_tick_ohlc_is_not_authoritative_day_change() -> None:
+    bare = resolve_reference(_row(ohlc_close=2000.0, last_price=2010.0))
+    assert bare["change_absolute"] is None
+    assert bare["reference_price"] is None
+    assert bare["reference_reason"] == "no_reference"
+
+
 def test_enrich_quote_keeps_legacy_change_and_adds_canonical() -> None:
-    dto = enrich_quote(_row(price_delta=0.25, last_price=2010.0, ohlc_close=2000.0))
+    dto = enrich_quote(
+        _row(price_delta=0.25, last_price=2010.0, ohlc_close=2000.0),
+        stored=_stored(),
+        session_date="2026-09-07",
+    )
     assert dto["change"] == 0.25
     assert dto["change_absolute"] == 10.0
     assert dto["change_percent"] == 0.5
@@ -246,7 +287,7 @@ def test_last_session_quote_uses_observed_reference(tmp_path: Path) -> None:
     assert last["session"]["live_data_expected"] is False
     assert last["quote"]["freshness"]["status"] == LAST_SESSION
     assert last["quote"]["change_absolute"] is not None
-    assert last["quote"]["reference_source"] == "kite_tick_ohlc_close"
+    assert last["quote"]["reference_source"] == "session_reference"
 
 
 def test_no_data_quote_and_degraded_subsystem(tmp_path: Path) -> None:
