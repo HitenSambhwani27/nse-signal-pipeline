@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from nse_pipeline.config import MarketAnalyticsSettings, Settings
 from nse_pipeline.market.activity import market_activity_row, tod_bucket
 from nse_pipeline.market.cache_health import lookup_instrument_meta
 from nse_pipeline.market.charts import CHART_POINT_FIELDS, chart_payload, merge_chart_rows
-from nse_pipeline.market.ohlc import load_historical_observations, load_ohlc_candles
+from nse_pipeline.market.ohlc import load_bar_series, load_ohlc_candles
 from nse_pipeline.market.cross_market import describe_cross_market
 from nse_pipeline.market.flow import (
     aggressive_side_proxy,
@@ -469,38 +470,129 @@ def assemble_charts(
 ) -> dict[str, Any]:
     cfg = _cfg(settings)
     samples = store.fetch_activity_samples(symbol, limit=5000)
-    historical, hist_source = load_historical_observations(
-        settings, symbol, lookback_days=cfg.chart_lookback_days
+    candles = load_ohlc_candles(
+        settings,
+        symbol,
+        interval=interval,
+        lookback_days=cfg.chart_lookback_days,
     )
-    rows = merge_chart_rows(historical, samples)
+    bar_points = [
+        {
+            "timestamp": row.get("timestamp"),
+            "last_price": row.get("close"),
+            "volume": row.get("volume"),
+            "oi": row.get("oi"),
+            "oi_delta": None,
+            "volume_delta": None,
+            "trade_notional": None,
+            "depth_imbalance": None,
+            "spread": None,
+        }
+        for row in candles.get("candles") or []
+    ]
+    rows = merge_chart_rows(bar_points, samples)
     payload = chart_payload(
         rows,
         max_points=cfg.chart_max_points,
         fields=CHART_POINT_FIELDS,
     )
-    payload.update(
-        load_ohlc_candles(
-            settings,
-            symbol,
-            interval=interval,
-            lookback_days=cfg.chart_lookback_days,
-        )
-    )
+    payload.update(candles)
     sources = []
-    if historical:
-        sources.append(hist_source or "compacted_ticks")
+    if candles.get("candles_source"):
+        sources.append(str(candles["candles_source"]))
     if samples:
         sources.append("activity_samples")
-    payload["source"] = "+".join(sources) if sources else None
-    # activity_samples is the live path; compacted Parquet is the historical one.
+    payload["source"] = "+".join(sources) if sources else candles.get("candles_source")
+    live_ts = samples[-1].get("timestamp") if samples else None
+    hist_ts = None
+    if candles.get("candles"):
+        hist_ts = candles["candles"][-1].get("timestamp")
     _choice, state = resolve(
         session=settings.session,
-        live_timestamp=samples[-1].get("timestamp") if samples else None,
-        historical_timestamp=historical[-1].get("timestamp") if historical else None,
-        historical_source=hist_source,
+        live_timestamp=live_ts,
+        historical_timestamp=hist_ts,
+        historical_source=candles.get("candles_source"),
         max_age_seconds=cfg.live_quote_max_age_seconds,
     )
     payload["data_state"] = state.to_dict()
+    return payload
+
+
+def assemble_candles(
+    settings: Settings,
+    symbol: str,
+    *,
+    interval: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    max_points: int | None = None,
+) -> dict[str, Any]:
+    cfg = _cfg(settings)
+    payload = load_ohlc_candles(
+        settings,
+        symbol,
+        interval=interval,
+        lookback_days=cfg.chart_lookback_days,
+        start=start,
+        end=end,
+        max_points=max_points or cfg.chart_max_points,
+    )
+    _choice, state = resolve(
+        session=settings.session,
+        live_timestamp=None,
+        historical_timestamp=(payload.get("candles") or [{}])[-1].get("timestamp")
+        if payload.get("candles")
+        else None,
+        historical_source=payload.get("candles_source"),
+        max_age_seconds=cfg.live_quote_max_age_seconds,
+    )
+    payload["data_state"] = state.to_dict()
+    return payload
+
+
+def assemble_series(
+    settings: Settings,
+    store: SQLiteStore,
+    symbol: str,
+    *,
+    fields: str | None = None,
+    interval: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> dict[str, Any]:
+    cfg = _cfg(settings)
+    payload = load_bar_series(
+        settings,
+        symbol,
+        fields=fields,
+        interval=interval,
+        lookback_days=cfg.chart_lookback_days,
+        start=start,
+        end=end,
+    )
+    wanted = [part.strip() for part in str(fields or "volume,oi").split(",") if part.strip()]
+    if "activity" in wanted:
+        samples = store.fetch_activity_samples(symbol, limit=cfg.chart_max_points)
+        payload.setdefault("series", {})["activity"] = [
+            {
+                "t": row.get("timestamp"),
+                "activity": row.get("last_quantity") or row.get("volume_delta"),
+            }
+            for row in samples
+        ]
+    _choice, state = resolve(
+        session=settings.session,
+        live_timestamp=None,
+        historical_timestamp=None,
+        historical_source=payload.get("source"),
+        max_age_seconds=cfg.live_quote_max_age_seconds,
+    )
+    if payload.get("coverage", {}).get("session_dates"):
+        state_dict = state.to_dict()
+        state_dict["session_date"] = payload["coverage"]["session_dates"][-1]
+        payload["data_state"] = state_dict
+    else:
+        payload["data_state"] = state.to_dict()
     return payload
 
 

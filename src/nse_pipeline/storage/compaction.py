@@ -142,6 +142,33 @@ def compact_date(settings: Settings, date_str: str) -> list[CompactSymbolResult]
         results.append(result)
         if result.skipped_reason:
             logger.info("Skip %s/%s: %s", date_str, result.symbol, result.skipped_reason)
+            compacted_ticks = (
+                settings.paths.compacted_dir / date_str / result.symbol / "ticks.parquet"
+            )
+            if compacted_ticks.is_file():
+                try:
+                    from nse_pipeline.storage.bars import materialize_symbol_session
+
+                    bars = materialize_symbol_session(settings, date_str, result.symbol)
+                    if bars.skipped_reason:
+                        logger.info(
+                            "Bars skip %s/%s: %s",
+                            date_str,
+                            result.symbol,
+                            bars.skipped_reason,
+                        )
+                    else:
+                        logger.info(
+                            "Bars %s/%s: 1m=%s daily=%s",
+                            date_str,
+                            result.symbol,
+                            bars.minute_rows,
+                            bars.daily_rows,
+                        )
+                except Exception:
+                    logger.exception(
+                        "RM-1 bar materialise failed for %s/%s", date_str, result.symbol
+                    )
         else:
             logger.info(
                 "Compacted %s/%s: %s files -> %s rows (%s)",
@@ -151,6 +178,24 @@ def compact_date(settings: Settings, date_str: str) -> list[CompactSymbolResult]
                 result.rows,
                 result.output_path,
             )
+            try:
+                from nse_pipeline.storage.bars import materialize_symbol_session
+
+                bars = materialize_symbol_session(settings, date_str, result.symbol)
+                if bars.skipped_reason:
+                    logger.info(
+                        "Bars skip %s/%s: %s", date_str, result.symbol, bars.skipped_reason
+                    )
+                else:
+                    logger.info(
+                        "Bars %s/%s: 1m=%s daily=%s",
+                        date_str,
+                        result.symbol,
+                        bars.minute_rows,
+                        bars.daily_rows,
+                    )
+            except Exception:
+                logger.exception("RM-1 bar materialise failed for %s/%s", date_str, result.symbol)
     return results
 
 

@@ -350,6 +350,8 @@ class Settings:
             self.paths.models_dir,
             self.paths.logs_dir,
             self.paths.membership_dir,
+            self.paths.data_dir / "bars",
+            self.paths.data_dir / "bars" / "daily",
         ):
             path.mkdir(parents=True, exist_ok=True)
 

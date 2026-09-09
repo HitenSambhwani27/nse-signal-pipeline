@@ -26,6 +26,15 @@ def _norm(value: Any) -> Any:
         return tuple(_norm(v) for v in value)
     if isinstance(value, tuple):
         return tuple(_norm(v) for v in value)
+    # Parquet depth columns arrive as numpy arrays, not Python lists.
+    # `array == array` is element-wise and cannot be used as a boolean.
+    shape = getattr(value, "shape", None)
+    tolist = getattr(value, "tolist", None)
+    if shape is not None and callable(tolist) and not isinstance(value, (str, bytes, dict)):
+        try:
+            return _norm(tolist())
+        except Exception:
+            return str(value)
     if hasattr(value, "isoformat"):
         try:
             return value.isoformat()

@@ -24,6 +24,7 @@ from nse_pipeline.session_coverage import (  # noqa: E402
     log_session_coverage,
 )
 from nse_pipeline.storage.compaction import compact_all_dates, compact_date  # noqa: E402
+from nse_pipeline.storage.bars import backfill_compacted_bars, summarize_bar_build  # noqa: E402
 from nse_pipeline.storage.duckdb_store import DuckDBTickStore  # noqa: E402
 
 
@@ -38,6 +39,11 @@ def main() -> int:
         action="store_true",
         help="After compact, print DuckDB row counts for the date(s)",
     )
+    parser.add_argument(
+        "--bars-only",
+        action="store_true",
+        help="Skip tick merge; materialize RM-1 bars from existing compacted ticks",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -45,6 +51,13 @@ def main() -> int:
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
     settings = load_settings()
+
+    if args.bars_only:
+        dates = [args.date] if args.date else None
+        bar_results = backfill_compacted_bars(settings, dates=dates)
+        summary = summarize_bar_build(bar_results)
+        print(f"RM-1 backfill {summary}")
+        return 0
 
     if args.date:
         results = compact_date(settings, args.date)
@@ -68,6 +81,11 @@ def main() -> int:
             coverage = assess_session_coverage(settings, date_str, store=store)
             log_session_coverage(settings, coverage)
             print(f"[{date_str}] {format_coverage_banner(coverage)}")
+
+    bar_dates = dates or []
+    if bar_dates:
+        extra = backfill_compacted_bars(settings, dates=bar_dates)
+        print(f"RM-1 bars: {summarize_bar_build(extra)}")
 
     if args.verify and dates:
         with DuckDBTickStore(settings) as store:

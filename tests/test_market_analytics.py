@@ -346,6 +346,29 @@ def test_dedupe_collapses_consecutive_reflush_rows() -> None:
     assert len(kept) == 1
 
 
+def test_dedupe_parquet_numpy_depth_arrays_are_not_ambiguous() -> None:
+    """Compacted ticks store bid/ask as ndarrays; list-only fingerprints hid this."""
+    import numpy as np
+
+    row = {
+        "instrument_token": 7,
+        "timestamp": "2026-09-04T03:45:01+00:00",
+        "last_price": 10.0,
+        "last_quantity": 1,
+        "volume": 50,
+        "oi": 3,
+        "bid_prices": np.array([9.5, 9.4]),
+        "bid_quantities": np.array([2, 1]),
+        "ask_prices": np.array([10.5, 10.6]),
+        "ask_quantities": np.array([2, 1]),
+    }
+    kept = dedupe_persisted_observations([row, dict(row)])
+    assert len(kept) == 1
+    changed = {**row, "bid_quantities": np.array([3, 1])}
+    kept = dedupe_persisted_observations([row, changed])
+    assert len(kept) == 2
+
+
 def test_dedupe_preserves_identical_payload_at_different_timestamps() -> None:
     first = {
         "instrument_token": 7,

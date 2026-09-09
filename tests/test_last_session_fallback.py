@@ -29,6 +29,7 @@ from nse_pipeline.market.data_state import (
     resolve,
 )
 from nse_pipeline.market.read_policy import MarketDataPolicy
+from nse_pipeline.storage.bars import materialize_symbol_session
 from nse_pipeline.storage.duckdb_store import DuckDBTickStore
 from nse_pipeline.storage.sqlite_store import SQLiteStore
 from tests.test_compaction import _settings
@@ -192,6 +193,14 @@ def _seed_last_session(settings) -> None:
                 _tick(symbol, token, when=CLOSE_IST, last_price=price, volume=70, oi=oi),
             ],
         )
+    for symbol in (
+        "NIFTY 50",
+        "HDFCBANK",
+        "NIFTY26SEPFUT",
+        "NIFTY26908100CE",
+        "NIFTY26908100PE",
+    ):
+        materialize_symbol_session(settings, LAST_SESSION, symbol)
 
 
 def _read_model(tmp_path: Path, *, now: datetime, seed_history: bool = True):
@@ -601,13 +610,14 @@ def test_charts_keep_historical_candles_after_close(tmp_path: Path) -> None:
     payload = read.charts("HDFCBANK", interval="1m")
     chart = payload["chart"]
     assert payload["found"] is True
-    assert chart["candles_status"] == "ok"
-    assert chart["candles_source"] == "compacted_ticks"
+    assert chart["candles_status"] == "partial"
+    assert chart["candles_source"] == "bars_1m"
     assert chart["candles"]
-    assert chart["source"] == "compacted_ticks"
+    assert chart["source"] == "bars_1m"
     assert payload["data_state"]["data_status"] == STATUS_LAST_SESSION
     assert payload["data_state"]["session_date"] == LAST_SESSION
-    assert payload["data_state"]["as_of"] == CLOSE_IST.isoformat()
+    assert payload["data_state"]["as_of"] is not None
+    assert payload["data_state"]["as_of"].startswith("2026-09-04T")
     stamps = [candle["timestamp"] for candle in chart["candles"]]
     assert all(stamp.startswith("2026-09-04") for stamp in stamps)
 

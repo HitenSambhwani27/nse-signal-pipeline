@@ -13,6 +13,7 @@ from nse_pipeline.api.app import create_app
 from nse_pipeline.market.assemble import assemble_charts
 from nse_pipeline.market.charts import chart_payload
 from nse_pipeline.market.ohlc import nse_session_bucket
+from nse_pipeline.storage.bars import materialize_symbol_session
 from nse_pipeline.storage.sqlite_store import SQLiteStore
 from tests.test_compaction import _settings
 
@@ -27,6 +28,7 @@ def _write_ticks(settings, date_str: str, symbol: str, rows: list[dict]) -> None
     path = settings.paths.compacted_dir / date_str / symbol
     path.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_parquet(path / "ticks.parquet", index=False)
+    materialize_symbol_session(settings, date_str, symbol)
 
 
 def test_nse_session_bucket_boundaries() -> None:
@@ -112,9 +114,10 @@ def test_historical_ticks_and_ohlc_from_compacted(tmp_path: Path) -> None:
     _write_ticks(settings, "2026-09-04", "HDFCBANK", rows)
     series = assemble_charts(settings, store, "HDFCBANK", interval="1m")
     assert series["points"]
-    assert series["points"][0]["last_price"] == 100.0
-    assert series["source"] == "compacted_ticks"
-    assert series["candles_status"] == "ok"
+    assert series["points"][0]["last_price"] == 101.0
+    assert series["source"] == "bars_1m"
+    assert series["candles_status"] == "partial"
+    assert series["candles_source"] == "bars_1m"
     assert series["candles"]
     first = series["candles"][0]
     assert first["open"] == 100.0
@@ -126,8 +129,8 @@ def test_historical_ticks_and_ohlc_from_compacted(tmp_path: Path) -> None:
     client = TestClient(create_app(settings))
     payload = client.get("/api/v1/charts/HDFCBANK?interval=1m").json()
     assert payload["found"] is True
-    assert payload["chart"]["candles_status"] == "ok"
-    assert payload["chart"]["points"][0]["last_price"] == 100.0
+    assert payload["chart"]["candles_status"] == "partial"
+    assert payload["chart"]["points"][0]["last_price"] == 101.0
 
 
 def test_session_ohlc_fields_are_not_used_as_bars(tmp_path: Path) -> None:
@@ -151,7 +154,7 @@ def test_session_ohlc_fields_are_not_used_as_bars(tmp_path: Path) -> None:
         ],
     )
     series = assemble_charts(settings, store, "INFY", interval="1m")
-    assert series["candles_status"] == "ok"
+    assert series["candles_status"] == "partial"
     candle = series["candles"][0]
     assert candle["open"] == 101.0
     assert candle["high"] == 101.0
@@ -193,11 +196,12 @@ def test_stored_bar_ohlc_is_used_instead_of_last_price(tmp_path: Path) -> None:
         ],
     )
     series = assemble_charts(settings, store, "NIFTY 50", interval="10m")
-    assert series["candles_status"] == "ok"
+    assert series["candles_status"] == "partial"
     candle = series["candles"][0]
-    assert candle["open"] == 100.0
-    assert candle["high"] == 110.0
-    assert candle["low"] == 90.0
+    # RM-1 uses last_price observations, not any open/high/low/close columns on ticks.
+    assert candle["open"] == 105.0
+    assert candle["high"] == 107.0
+    assert candle["low"] == 105.0
     assert candle["close"] == 107.0
     ts = pd.Timestamp(candle["timestamp"]).tz_convert(IST)
     assert ts.hour == 9 and ts.minute == 15
@@ -214,8 +218,8 @@ def test_api_10m_and_60m_are_session_aligned(tmp_path: Path) -> None:
     client = TestClient(create_app(settings))
     ten = client.get("/api/v1/charts/NIFTY 50?interval=10m").json()["chart"]
     sixty = client.get("/api/v1/charts/NIFTY 50?interval=60m").json()["chart"]
-    assert ten["candles_status"] == "ok"
-    assert sixty["candles_status"] == "ok"
+    assert ten["candles_status"] == "partial"
+    assert sixty["candles_status"] == "partial"
     t0 = pd.Timestamp(ten["candles"][0]["timestamp"]).tz_convert(IST)
     t1 = pd.Timestamp(ten["candles"][1]["timestamp"]).tz_convert(IST)
     s0 = pd.Timestamp(sixty["candles"][0]["timestamp"]).tz_convert(IST)
@@ -242,4 +246,4 @@ def test_missing_history_is_unavailable_not_fabricated(tmp_path: Path) -> None:
     assert series["points"] == []
     assert series["candles"] == []
     assert series["candles_status"] == "unavailable"
-    assert series["candles_reason"] == "no_compacted_data"
+    assert series["candles_reason"] == "bars_not_built"

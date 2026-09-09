@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from nse_pipeline.api.read_model import SqliteUiReadModel
@@ -85,6 +85,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/v1/charts/{symbol:path}")
     def charts(symbol: str, interval: str | None = None) -> dict[str, Any]:
         return read.charts(symbol, interval=interval)
+
+    @app.get("/api/v1/candles/{symbol:path}")
+    def candles(
+        symbol: str,
+        interval: str | None = None,
+        range_from: str | None = Query(None, alias="from"),
+        range_to: str | None = Query(None, alias="to"),
+        max_points: int = 500,
+    ) -> dict[str, Any]:
+        return read.candles(
+            symbol,
+            interval=interval,
+            range_from=range_from,
+            range_to=range_to,
+            max_points=max_points,
+        )
+
+    @app.get("/api/v1/series/{symbol:path}")
+    def series(
+        symbol: str,
+        fields: str | None = None,
+        interval: str | None = None,
+        range_from: str | None = Query(None, alias="from"),
+        range_to: str | None = Query(None, alias="to"),
+    ) -> dict[str, Any]:
+        return read.series(
+            symbol,
+            fields=fields,
+            interval=interval,
+            range_from=range_from,
+            range_to=range_to,
+        )
 
     @app.get("/api/v1/watchlists")
     def watchlists() -> dict[str, Any]:

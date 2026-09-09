@@ -91,6 +91,7 @@ RESPONSE_SIZE_LIMITS: dict[str, dict[str, int]] = {
     "quotes_bulk": {"max_bytes": 65_536, "max_rows": 250},
     "instruments": {"max_bytes": 65_536, "max_rows": 50},
     "candles": {"max_bytes": 262_144, "max_rows": 500},
+    "series": {"max_bytes": 262_144, "max_rows": 500},
     "options": {"max_bytes": 262_144},
     "futures": {"max_bytes": 65_536},
     "unusual_activity": {"max_bytes": 262_144, "max_rows": 100},

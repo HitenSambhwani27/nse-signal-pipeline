@@ -13,6 +13,7 @@ from nse_pipeline.api.contracts import default_subsystems, intelligence_status
 from nse_pipeline.broker.session import public_token_status, token_present
 from nse_pipeline.config import Settings
 from nse_pipeline.market.assemble import (
+    assemble_candles,
     assemble_charts,
     assemble_cross_market,
     assemble_futures,
@@ -20,6 +21,7 @@ from nse_pipeline.market.assemble import (
     assemble_option_chain,
     assemble_quote,
     assemble_quotes,
+    assemble_series,
     assemble_unusual,
 )
 from nse_pipeline.market.cache_health import instrument_cache_health
@@ -44,6 +46,23 @@ MATURITY_CACHE_TTL_S = 30.0
 
 def _as_of() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_query_time(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        stamp = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+    return stamp
 
 
 def _options_key(row: dict[str, Any]) -> str:
@@ -333,6 +352,74 @@ class SqliteUiReadModel:
         )
         found = bool(series.get("points") or series.get("candles"))
         return self._envelope(found=found, chart=series, data_state=self._state_of(series))
+
+    def candles(
+        self,
+        symbol: str,
+        *,
+        interval: str | None = None,
+        range_from: str | None = None,
+        range_to: str | None = None,
+        max_points: int | None = None,
+    ) -> dict[str, Any]:
+        wanted = unquote(symbol).strip()
+        cap = 500
+        try:
+            limit = int(max_points) if max_points is not None else cap
+        except (TypeError, ValueError):
+            limit = cap
+        limit = max(1, min(limit, cap))
+        payload = assemble_candles(
+            self.settings,
+            wanted,
+            interval=interval,
+            start=_parse_query_time(range_from),
+            end=_parse_query_time(range_to),
+            max_points=limit,
+        )
+        found = bool(payload.get("candles"))
+        return self._envelope(
+            found=found,
+            candles=payload.get("candles") or [],
+            interval=payload.get("interval"),
+            coverage=payload.get("coverage"),
+            candles_status=payload.get("candles_status"),
+            candles_reason=payload.get("candles_reason"),
+            candles_source=payload.get("candles_source"),
+            data_state=self._state_of(payload, wanted),
+        )
+
+    def series(
+        self,
+        symbol: str,
+        *,
+        fields: str | None = None,
+        interval: str | None = None,
+        range_from: str | None = None,
+        range_to: str | None = None,
+    ) -> dict[str, Any]:
+        wanted = unquote(symbol).strip()
+        payload = assemble_series(
+            self.settings,
+            self.store,
+            wanted,
+            fields=fields,
+            interval=interval,
+            start=_parse_query_time(range_from),
+            end=_parse_query_time(range_to),
+        )
+        series = payload.get("series") or {}
+        found = any(bool(v) for v in series.values())
+        return self._envelope(
+            found=found,
+            series=series,
+            interval=payload.get("interval"),
+            coverage=payload.get("coverage"),
+            series_status=payload.get("series_status"),
+            series_reason=payload.get("series_reason"),
+            series_source=payload.get("source"),
+            data_state=self._state_of(payload, wanted),
+        )
 
     def watchlists(self) -> dict[str, Any]:
         self.store.ensure_default_watchlist(
