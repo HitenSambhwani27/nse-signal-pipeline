@@ -19,6 +19,27 @@ from nse_pipeline.market.derived import (
 from nse_pipeline.storage.schemas import NormalizedTick
 
 
+def _depth_levels(prices: Any, quantities: Any, orders: Any = None) -> list[list[float | int]] | None:
+    if not prices or not quantities:
+        return None
+    px = list(prices)
+    qty = list(quantities)
+    ords = list(orders) if orders else [None] * len(px)
+    out: list[list[float | int]] = []
+    for i, price in enumerate(px):
+        if price is None:
+            continue
+        q = qty[i] if i < len(qty) else None
+        o = ords[i] if i < len(ords) else None
+        if q is None and o is None:
+            out.append([float(price)])
+        elif o is None:
+            out.append([float(price), int(q)])
+        else:
+            out.append([float(price), int(q or 0), int(o)])
+    return out or None
+
+
 def _parse_snapshot_ts(value: Any) -> datetime | None:
     if value is None:
         return None
@@ -85,6 +106,8 @@ def snapshot_from_tick(
         "ohlc_low": tick.ohlc_low,
         "ohlc_close": tick.ohlc_close,
         "last_trade_time": ltt.isoformat() if ltt is not None and hasattr(ltt, "isoformat") else (str(ltt) if ltt else None),
+        "bid_levels": _depth_levels(tick.bid_prices, tick.bid_quantities, getattr(tick, "bid_orders", None)),
+        "ask_levels": _depth_levels(tick.ask_prices, tick.ask_quantities, getattr(tick, "ask_orders", None)),
     }
 
 

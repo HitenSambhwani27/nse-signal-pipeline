@@ -33,6 +33,31 @@ def _ts_iso(ts: Any) -> str:
     return t.isoformat()
 
 
+def _observation_instant(row: dict[str, Any]) -> datetime | None:
+    observed, repair = canonical_observation(
+        row.get("timestamp"), ingested_at=row.get("ingested_at")
+    )
+    if observed is None or repair == AMBIGUOUS_UTC_HOUR:
+        return parse_instant(row.get("timestamp"))
+    return observed
+
+
+def _observation_is_older(incoming: dict[str, Any], existing: dict[str, Any]) -> bool:
+    new_ts = _observation_instant(incoming)
+    old_ts = _observation_instant(existing)
+    if new_ts is None or old_ts is None:
+        return False
+    return new_ts < old_ts
+
+
+def _levels_sql(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return json.dumps(value)
+
+
 SCHEMA_SQL = """
 PRAGMA journal_mode=WAL;
 
@@ -285,9 +310,28 @@ CREATE TABLE IF NOT EXISTS latest_quotes (
     ohlc_low REAL,
     ohlc_close REAL,
     last_trade_time TEXT,
+    bid_levels TEXT,
+    ask_levels TEXT,
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_latest_quotes_symbol ON latest_quotes(symbol);
+
+CREATE TABLE IF NOT EXISTS subscription_requests (
+    token INTEGER NOT NULL,
+    requester TEXT NOT NULL,
+    action TEXT NOT NULL,
+    capabilities_json TEXT,
+    ttl_seconds INTEGER NOT NULL,
+    requested_at TEXT NOT NULL,
+    expires_at TEXT,
+    status TEXT NOT NULL,
+    reason TEXT,
+    PRIMARY KEY (token, requester)
+);
+CREATE INDEX IF NOT EXISTS idx_subscription_requests_expires
+    ON subscription_requests(expires_at);
+CREATE INDEX IF NOT EXISTS idx_subscription_requests_status
+    ON subscription_requests(status);
 
 CREATE TABLE IF NOT EXISTS activity_samples (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -429,8 +473,11 @@ def _migrate_session_reference(conn: sqlite3.Connection) -> None:
 class SQLiteStore:
     """Thin wrapper around sqlite3 with schema initialization."""
 
-    def __init__(self, db_path: Path) -> None:
-        self.db_path = db_path
+    busy_retries = 0
+
+    def __init__(self, db_path: Path, *, busy_timeout_ms: int = 5000) -> None:
+        self.db_path = Path(db_path)
+        self.busy_timeout_ms = int(busy_timeout_ms)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
@@ -491,26 +538,64 @@ class SQLiteStore:
                 ("ohlc_low", "ALTER TABLE latest_quotes ADD COLUMN ohlc_low REAL"),
                 ("ohlc_close", "ALTER TABLE latest_quotes ADD COLUMN ohlc_close REAL"),
                 ("last_trade_time", "ALTER TABLE latest_quotes ADD COLUMN last_trade_time TEXT"),
+                ("bid_levels", "ALTER TABLE latest_quotes ADD COLUMN bid_levels TEXT"),
+                ("ask_levels", "ALTER TABLE latest_quotes ADD COLUMN ask_levels TEXT"),
             ):
                 if col not in lq_cols:
                     conn.execute(sql)
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS subscription_requests (
+                    token INTEGER NOT NULL,
+                    requester TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    capabilities_json TEXT,
+                    ttl_seconds INTEGER NOT NULL,
+                    requested_at TEXT NOT NULL,
+                    expires_at TEXT,
+                    status TEXT NOT NULL,
+                    reason TEXT,
+                    PRIMARY KEY (token, requester)
+                );
+                CREATE INDEX IF NOT EXISTS idx_subscription_requests_expires
+                    ON subscription_requests(expires_at);
+                CREATE INDEX IF NOT EXISTS idx_subscription_requests_status
+                    ON subscription_requests(status);
+                """
+            )
             _migrate_session_reference(conn)
 
     @contextmanager
-    def connection(self) -> Generator[sqlite3.Connection, None, None]:
+    def connection(
+        self, *, read_only: bool = False
+    ) -> Generator[sqlite3.Connection, None, None]:
         """
         Context manager for DB connections.
 
-        'with' blocks auto-close resources — like C# 'using' statements.
+        API readers should pass read_only=True. Timeouts follow N-9:
+        API ~5000 ms, ingest ~10000 ms.
         """
-        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        timeout_s = max(self.busy_timeout_ms / 1000.0, 0.1)
+        if read_only:
+            uri = f"file:{self.db_path.as_posix()}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=timeout_s)
+        else:
+            conn = sqlite3.connect(self.db_path, timeout=timeout_s)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute(f"PRAGMA busy_timeout={int(self.busy_timeout_ms)}")
         try:
             yield conn
-            conn.commit()
+            if not read_only:
+                conn.commit()
+        except sqlite3.OperationalError as exc:
+            if "busy" in str(exc).lower() or "locked" in str(exc).lower():
+                type(self).busy_retries += 1
+            if not read_only:
+                conn.rollback()
+            raise
         except Exception:
-            conn.rollback()
+            if not read_only:
+                conn.rollback()
             raise
         finally:
             conn.close()
@@ -974,11 +1059,29 @@ class SQLiteStore:
         return out
 
     def upsert_latest_quotes(self, rows: Iterable[dict[str, Any]]) -> int:
-        """Replace the latest snapshot for each instrument_token. Not a tick log."""
+        """Replace the latest snapshot for each instrument_token. Not a tick log.
+
+        A late-arriving older observation cannot regress an existing row.
+        Ordering uses canonical observation time, not ingest arrival.
+        """
         payload = list(rows)
         if not payload:
             return 0
+        tokens = [int(r["instrument_token"]) for r in payload if r.get("instrument_token") is not None]
+        existing = {int(r["instrument_token"]): r for r in self.fetch_latest_quotes_by_tokens(tokens)}
+        kept: list[dict[str, Any]] = []
+        for row in payload:
+            token = row.get("instrument_token")
+            if token is None:
+                continue
+            prior = existing.get(int(token))
+            if prior is not None and _observation_is_older(row, prior):
+                continue
+            kept.append(row)
+        if not kept:
+            return 0
         now = datetime.now(timezone.utc).isoformat()
+        payload = kept
         with self.connection() as conn:
             conn.executemany(
                 """
@@ -991,9 +1094,10 @@ class SQLiteStore:
                     bid_depth_5, ask_depth_5, spread, mid_price, depth_imbalance,
                     volume_delta, oi_delta, price_delta,
                     ohlc_open, ohlc_high, ohlc_low, ohlc_close, last_trade_time,
+                    bid_levels, ask_levels,
                     updated_at
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 ON CONFLICT(instrument_token) DO UPDATE SET
                     symbol=excluded.symbol,
@@ -1024,6 +1128,8 @@ class SQLiteStore:
                     ohlc_low=excluded.ohlc_low,
                     ohlc_close=excluded.ohlc_close,
                     last_trade_time=excluded.last_trade_time,
+                    bid_levels=excluded.bid_levels,
+                    ask_levels=excluded.ask_levels,
                     updated_at=excluded.updated_at
                 """,
                 [
@@ -1057,12 +1163,97 @@ class SQLiteStore:
                         r.get("ohlc_low"),
                         r.get("ohlc_close"),
                         r.get("last_trade_time"),
+                        _levels_sql(r.get("bid_levels")),
+                        _levels_sql(r.get("ask_levels")),
                         now,
                     )
                     for r in payload
                 ],
             )
         return len(payload)
+
+    def fetch_latest_quotes_by_tokens(
+        self, tokens: Iterable[int], *, read_only: bool = False
+    ) -> list[dict[str, Any]]:
+        """Indexed latest_quotes point lookup. Stream poll path. No Parquet."""
+        wanted = sorted({int(t) for t in tokens})
+        if not wanted:
+            return []
+        placeholders = ",".join("?" for _ in wanted)
+        with self.connection(read_only=read_only) as conn:
+            rows = conn.execute(
+                f"SELECT * FROM latest_quotes WHERE instrument_token IN ({placeholders})",
+                wanted,
+            ).fetchall()
+        return [canonicalize_row(dict(row)) for row in rows]
+
+    def ingest_generation(self, *, read_only: bool = True) -> int:
+        """Monotonic ingest-process generation from ingestion_meta startup rows."""
+        with self.connection(read_only=read_only) as conn:
+            row = conn.execute(
+                """
+                SELECT COALESCE(MAX(id), 0) FROM ingestion_meta
+                WHERE event_type IN ('startup', 'warm_start')
+                """
+            ).fetchone()
+        return int(row[0] if row and row[0] is not None else 0)
+
+    def upsert_subscription_request(self, row: dict[str, Any]) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO subscription_requests (
+                    token, requester, action, capabilities_json, ttl_seconds,
+                    requested_at, expires_at, status, reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(token, requester) DO UPDATE SET
+                    action=excluded.action,
+                    capabilities_json=excluded.capabilities_json,
+                    ttl_seconds=excluded.ttl_seconds,
+                    requested_at=excluded.requested_at,
+                    expires_at=excluded.expires_at,
+                    status=excluded.status,
+                    reason=excluded.reason
+                """,
+                (
+                    int(row["token"]),
+                    str(row["requester"]),
+                    str(row["action"]),
+                    row.get("capabilities_json"),
+                    int(row["ttl_seconds"]),
+                    str(row["requested_at"]),
+                    row.get("expires_at"),
+                    str(row["status"]),
+                    row.get("reason"),
+                ),
+            )
+
+    def fetch_subscription_requests(self, *, active_only: bool = False) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM subscription_requests"
+        if active_only:
+            sql += " WHERE status IN ('pending', 'applied')"
+        with self.connection() as conn:
+            rows = conn.execute(sql).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_subscription_request(
+        self, token: int, requester: str, **fields: Any
+    ) -> None:
+        if not fields:
+            return
+        assignments = ", ".join(f"{key}=?" for key in fields)
+        with self.connection() as conn:
+            conn.execute(
+                f"UPDATE subscription_requests SET {assignments} WHERE token=? AND requester=?",
+                [*fields.values(), int(token), str(requester)],
+            )
+
+    def delete_subscription_request(self, token: int, requester: str) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                "DELETE FROM subscription_requests WHERE token=? AND requester=?",
+                (int(token), str(requester)),
+            )
 
     def fetch_latest_quote(self, symbol: str) -> dict[str, Any] | None:
         wanted = symbol.strip()

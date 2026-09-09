@@ -39,6 +39,7 @@ from nse_pipeline.signals.maturity import (
     signal_public_view,
 )
 from nse_pipeline.storage.retention import disk_usage_report
+from nse_pipeline.live.observability import stats_dict
 from nse_pipeline.storage.sqlite_store import SQLiteStore
 
 MATURITY_CACHE_TTL_S = 30.0
@@ -169,6 +170,8 @@ class SqliteUiReadModel:
         blob.setdefault("database", "ok")
         blob.setdefault("processing_lag", "unknown")
         blob["instrument_cache"] = self._instrument_cache_health()
+        blob["stream"] = stats_dict()
+        blob["sqlite_busy_retries"] = int(SQLiteStore.busy_retries)
         blob.update(self._disk_health())
         blob.update(self._token_health(blob))
         calendar_rows = self._ensure_weekday_calendar()

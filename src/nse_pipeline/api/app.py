@@ -2,27 +2,52 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from nse_pipeline.api.read_model import SqliteUiReadModel
 from nse_pipeline.config import Settings, load_settings
+from nse_pipeline.live.frames import parse_groups
+from nse_pipeline.live.source import SqlitePollSource
+from nse_pipeline.live.stream import StreamAdmissionError, StreamRegistry, stream_events
+from nse_pipeline.live.subscriptions import SubscriptionManager
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
     read = SqliteUiReadModel(settings)
+    read.store.busy_timeout_ms = int(settings.stream.api_busy_timeout_ms)
+    live_source = SqlitePollSource(settings, read.store)
+    stream_registry = StreamRegistry(settings, live_source)
 
-    app = FastAPI(title="NSE pipeline UI API", version="v1")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.live_source = live_source
+        app.state.stream_registry = stream_registry
+        task = asyncio.create_task(live_source.run_forever())
+        try:
+            yield
+        finally:
+            await live_source.stop()
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+    app = FastAPI(title="NSE pipeline UI API", version="v1", lifespan=lifespan)
+    app.state.live_source = live_source
+    app.state.stream_registry = stream_registry
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
             "http://127.0.0.1:8501",
             "http://localhost:8501",
         ],
-        allow_methods=["GET"],
+        allow_methods=["GET", "POST"],
         allow_headers=["*"],
     )
 
@@ -117,6 +142,82 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             range_from=range_from,
             range_to=range_to,
         )
+
+    @app.get("/api/v1/stream")
+    async def stream(
+        request: Request,
+        tokens: str | None = None,
+        groups: str | None = None,
+    ):
+        registry: StreamRegistry = request.app.state.stream_registry
+        source: SqlitePollSource = request.app.state.live_source
+        try:
+            parsed, rejected = registry.validate_tokens(tokens)
+            group_list = parse_groups(groups)
+            await registry.acquire()
+        except StreamAdmissionError as exc:
+            headers = {}
+            if exc.retry_after is not None:
+                headers["Retry-After"] = str(exc.retry_after)
+            return JSONResponse(
+                {"error": exc.reason, "reason": exc.reason},
+                status_code=exc.status,
+                headers=headers,
+            )
+        session = source._session or source._session_snapshot()
+        last_id = request.headers.get("last-event-id") or request.headers.get("Last-Event-ID")
+
+        async def generate():
+            try:
+                async for chunk in stream_events(
+                    registry=registry,
+                    source=source,
+                    tokens=parsed,
+                    groups=group_list,
+                    last_event_id=last_id,
+                    session=session,
+                    rejected=rejected,
+                ):
+                    yield chunk
+            finally:
+                await registry.release()
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+
+    @app.post("/api/v1/subscriptions")
+    def subscriptions(body: dict[str, Any]) -> Any:
+        cache = read._load_instrument_cache() or {}
+        manager = SubscriptionManager(
+            settings,
+            read.store,
+            static_full=[],
+            static_quote=[],
+            instrument_cache=cache,
+        )
+        try:
+            request = manager.validate_request(
+                token=body.get("token"),
+                symbol=body.get("symbol"),
+                requester=str(body.get("requester") or ""),
+                capabilities=list(body.get("capabilities") or ["price"]),
+                action=str(body.get("action") or "subscribe"),
+                ttl_seconds=body.get("ttl_seconds") or body.get("ttl"),
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                {"error": str(exc), "reason": str(exc)},
+                status_code=400,
+            )
+        result = manager.enqueue(request)
+        return {"ok": True, **result}
 
     @app.get("/api/v1/watchlists")
     def watchlists() -> dict[str, Any]:

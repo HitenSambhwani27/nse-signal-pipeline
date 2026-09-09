@@ -28,6 +28,7 @@ from nse_pipeline.broker.instruments import (
 from nse_pipeline.broker.session import AUTH_BACKOFF_SECONDS, TokenState, classify_exception
 from nse_pipeline.config import Settings
 from nse_pipeline.market.activity import tod_bucket, trade_notional
+from nse_pipeline.live.subscriptions import SubscriptionManager
 from nse_pipeline.market.latest import LatestQuoteTracker
 from nse_pipeline.market.normalize import normalize_tick
 from nse_pipeline.storage.parquet_writer import BufferedParquetWriter
@@ -49,7 +50,10 @@ class WebSocketIngestionService:
     def __init__(self, settings: Settings, kite: KiteConnect) -> None:
         self.settings = settings
         self.kite = kite
-        self.store = SQLiteStore(settings.paths.sqlite_db)
+        self.store = SQLiteStore(
+            settings.paths.sqlite_db,
+            busy_timeout_ms=int(settings.stream.ingest_busy_timeout_ms),
+        )
         self.writer = BufferedParquetWriter(
             raw_dir=settings.paths.raw_dir,
             flush_interval_seconds=settings.ingestion.flush_interval_seconds,
@@ -65,6 +69,12 @@ class WebSocketIngestionService:
         self._quotes = LatestQuoteTracker()
         self._last_quote_persist = 0.0
         self._last_activity_sample: dict[int, float] = {}
+        self._subscriptions = SubscriptionManager(
+            settings,
+            self.store,
+            static_full=self.full_tokens,
+            static_quote=self.quote_tokens,
+        )
 
         self._stop_event = threading.Event()
         self._connection_lost_event = threading.Event()
@@ -291,6 +301,10 @@ class WebSocketIngestionService:
             while not self._stop_event.is_set() and not self._connection_lost_event.is_set():
                 time.sleep(1.0)
                 self._persist_latest_quotes()
+                try:
+                    self._subscriptions.reconcile(self._ticker)
+                except Exception:
+                    logger.exception("subscription reconcile failed")
 
             if self._stop_event.is_set():
                 break

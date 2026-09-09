@@ -154,6 +154,32 @@ class MarketAnalyticsSettings:
 
 
 @dataclass
+class StreamSettings:
+    """SSE / LiveSource limits. Version-stamped with broker.limits."""
+
+    version: str = "2026-09-09"
+    poll_interval_seconds: float = 1.0
+    heartbeat_ms: int = 5000
+    max_connections: int = 16
+    max_instruments_per_connection: int = 250
+    schema_version: str = "1"
+    dynamic_ttl_seconds: int = 300
+    mode_change_batch_size: int = 50
+    api_busy_timeout_ms: int = 5000
+    ingest_busy_timeout_ms: int = 10000
+
+
+@dataclass
+class BrokerLimitsSettings:
+    """Hard admission control for the single Kite WebSocket (N-8)."""
+
+    version: str = "2026-09-09"
+    max_instruments_per_connection: int = 3000
+    max_total_subscriptions: int = 2500
+    max_concurrent_broker_connections: int = 1
+
+
+@dataclass
 class IngestionSettings:
     flush_interval_seconds: int
     flush_max_rows: int
@@ -338,6 +364,8 @@ class Settings:
     )
     analytics: MarketAnalyticsSettings = field(default_factory=MarketAnalyticsSettings)
     retention: RetentionSettings = field(default_factory=RetentionSettings)
+    stream: StreamSettings = field(default_factory=StreamSettings)
+    broker_limits: BrokerLimitsSettings = field(default_factory=BrokerLimitsSettings)
     raw_config: dict[str, Any] = field(repr=False, default_factory=dict)
 
     def ensure_directories(self) -> None:
@@ -688,6 +716,33 @@ def load_settings(config_path: Path | None = None) -> Settings:
         ),
     )
 
+    st_cfg = config.get("stream") or {}
+    stream = StreamSettings(
+        version=str(st_cfg.get("version", "2026-09-09")),
+        poll_interval_seconds=float(st_cfg.get("poll_interval_seconds", 1.0)),
+        heartbeat_ms=int(st_cfg.get("heartbeat_ms", 5000)),
+        max_connections=int(st_cfg.get("max_connections", 16)),
+        max_instruments_per_connection=int(
+            st_cfg.get("max_instruments_per_connection", 250)
+        ),
+        schema_version=str(st_cfg.get("schema_version", "1")),
+        dynamic_ttl_seconds=int(st_cfg.get("dynamic_ttl_seconds", 300)),
+        mode_change_batch_size=int(st_cfg.get("mode_change_batch_size", 50)),
+        api_busy_timeout_ms=int(st_cfg.get("api_busy_timeout_ms", 5000)),
+        ingest_busy_timeout_ms=int(st_cfg.get("ingest_busy_timeout_ms", 10000)),
+    )
+    bl_cfg = (config.get("broker") or {}).get("limits") or {}
+    broker_limits = BrokerLimitsSettings(
+        version=str(bl_cfg.get("version", "2026-09-09")),
+        max_instruments_per_connection=int(
+            bl_cfg.get("max_instruments_per_connection", 3000)
+        ),
+        max_total_subscriptions=int(bl_cfg.get("max_total_subscriptions", 2500)),
+        max_concurrent_broker_connections=int(
+            bl_cfg.get("max_concurrent_broker_connections", 1)
+        ),
+    )
+
     settings = Settings(
         paths=paths,
         universe=universe,
@@ -711,6 +766,8 @@ def load_settings(config_path: Path | None = None) -> Settings:
         stock_derivatives=stock_derivatives,
         analytics=analytics,
         retention=retention,
+        stream=stream,
+        broker_limits=broker_limits,
         raw_config=config,
     )
     settings.ensure_directories()

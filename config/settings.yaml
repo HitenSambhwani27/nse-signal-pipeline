@@ -309,3 +309,24 @@ retention:
   quality_log_days: 180
   signal_log: forever
   raw_bytes_per_session_estimate: 2500000000
+
+# Phase 4 live transport. Limits are version-stamped; do not raise casually.
+stream:
+  version: "2026-09-09"
+  poll_interval_seconds: 1.0
+  heartbeat_ms: 5000
+  max_connections: 16
+  max_instruments_per_connection: 250
+  schema_version: "1"
+  dynamic_ttl_seconds: 300
+  mode_change_batch_size: 50
+  api_busy_timeout_ms: 5000
+  ingest_busy_timeout_ms: 10000
+
+# Single Kite WebSocket budget (N-8). max_concurrent_broker_connections must stay 1.
+broker:
+  limits:
+    version: "2026-09-09"
+    max_instruments_per_connection: 3000
+    max_total_subscriptions: 2500
+    max_concurrent_broker_connections: 1
