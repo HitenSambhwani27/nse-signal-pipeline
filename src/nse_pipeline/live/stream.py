@@ -88,28 +88,28 @@ async def stream_events(
         rejected=rejected,
         schema_version=source.schema_version,
     )
-    yield format_sse("hello", hello).encode("utf-8")
-
-    if last_event_id:
-        try:
-            last_seq = int(str(last_event_id).strip())
-        except ValueError:
-            last_seq = -1
-        if last_seq == source.seq:
-            pass
-        elif 0 <= last_seq < source.seq:
-            yield format_sse(
-                "resync",
-                resync_payload(reason="unavailable_continuity", from_seq=source.seq),
-            ).encode("utf-8")
-        else:
-            yield format_sse(
-                "resync",
-                resync_payload(reason="stream_process_restart", from_seq=source.seq),
-            ).encode("utf-8")
-
     sub: Subscriber | None = None
     try:
+        yield format_sse("hello", hello).encode("utf-8")
+
+        if last_event_id:
+            try:
+                last_seq = int(str(last_event_id).strip())
+            except ValueError:
+                last_seq = -1
+            if last_seq == source.seq:
+                pass
+            elif 0 <= last_seq < source.seq:
+                yield format_sse(
+                    "resync",
+                    resync_payload(reason="unavailable_continuity", from_seq=source.seq),
+                ).encode("utf-8")
+            else:
+                yield format_sse(
+                    "resync",
+                    resync_payload(reason="stream_process_restart", from_seq=source.seq),
+                ).encode("utf-8")
+
         sub = await source.subscribe(set(tokens), groups)
         timeout = max(heartbeat_ms / 1000.0, 1.0)
         last_beat = time.monotonic()

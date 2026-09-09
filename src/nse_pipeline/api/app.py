@@ -168,19 +168,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         last_id = request.headers.get("last-event-id") or request.headers.get("Last-Event-ID")
 
         async def generate():
-            try:
-                async for chunk in stream_events(
-                    registry=registry,
-                    source=source,
-                    tokens=parsed,
-                    groups=group_list,
-                    last_event_id=last_id,
-                    session=session,
-                    rejected=rejected,
-                ):
-                    yield chunk
-            finally:
-                await registry.release()
+            # stream_events owns registry.release() in its finally.
+            # A second release here under-counts current_connections after close.
+            async for chunk in stream_events(
+                registry=registry,
+                source=source,
+                tokens=parsed,
+                groups=group_list,
+                last_event_id=last_id,
+                session=session,
+                rejected=rejected,
+            ):
+                yield chunk
 
         return StreamingResponse(
             generate(),

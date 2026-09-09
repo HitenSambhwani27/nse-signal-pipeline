@@ -170,7 +170,26 @@ class SqliteUiReadModel:
         blob.setdefault("database", "ok")
         blob.setdefault("processing_lag", "unknown")
         blob["instrument_cache"] = self._instrument_cache_health()
-        blob["stream"] = stats_dict()
+        stream = stats_dict()
+        try:
+            row = None
+            with self.store.connection(read_only=True) as conn:
+                row = conn.execute(
+                    """
+                    SELECT details_json FROM ingestion_meta
+                    WHERE event_type = 'subscription_reconcile'
+                    ORDER BY id DESC LIMIT 1
+                    """
+                ).fetchone()
+            if row and row[0]:
+                details = json.loads(row[0])
+                if details.get("static") is not None:
+                    stream["static_token_count"] = int(details["static"])
+                if details.get("dynamic") is not None:
+                    stream["dynamic_token_count"] = int(details["dynamic"])
+        except Exception:
+            pass
+        blob["stream"] = stream
         blob["sqlite_busy_retries"] = int(SQLiteStore.busy_retries)
         blob.update(self._disk_health())
         blob.update(self._token_health(blob))

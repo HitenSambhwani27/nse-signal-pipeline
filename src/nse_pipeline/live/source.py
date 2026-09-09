@@ -152,12 +152,26 @@ class SqlitePollSource:
     def _session_snapshot(self) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         day = load_calendar_day(self.store, self.settings.session, now=now)
-        return build_session_view(
+        view = build_session_view(
             self.settings.session,
             now=now,
             day=day,
             lookup=calendar_lookup(self.store, self.settings.session),
         )
+        try:
+            label = self.store.session_coverage_label(
+                str(view.get("session_date") or ""), read_only=True
+            )
+        except Exception:
+            try:
+                label = self.store.session_coverage_label(
+                    str(view.get("session_date") or ""), read_only=False
+                )
+            except Exception:
+                label = None
+        if label:
+            view["coverage"] = label
+        return view
 
     def _diff(
         self,

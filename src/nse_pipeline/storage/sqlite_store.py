@@ -1198,6 +1198,33 @@ class SQLiteStore:
             ).fetchone()
         return int(row[0] if row and row[0] is not None else 0)
 
+    def session_coverage_label(self, session_date: str, *, read_only: bool = True) -> str | None:
+        """Live coverage from ingest evidence only. Never claims FULL_SESSION."""
+        wanted = str(session_date or "").strip()
+        if not wanted:
+            return None
+        with self.connection(read_only=read_only) as conn:
+            rows = conn.execute(
+                """
+                SELECT details_json, timestamp FROM ingestion_meta
+                WHERE event_type = 'warm_start'
+                ORDER BY id DESC
+                LIMIT 200
+                """
+            ).fetchall()
+        for details_json, timestamp in rows:
+            session = None
+            if details_json:
+                try:
+                    session = json.loads(details_json).get("session_date")
+                except json.JSONDecodeError:
+                    session = None
+            if session == wanted:
+                return "PARTIAL_SESSION"
+            if session is None and str(timestamp or "").startswith(wanted):
+                return "PARTIAL_SESSION"
+        return None
+
     def upsert_subscription_request(self, row: dict[str, Any]) -> None:
         with self.connection() as conn:
             conn.execute(
